@@ -1,6 +1,6 @@
 # Digital Membership Binary Format
 
-Draft version 0.3
+Draft version 0.4
 
 ## 1. Purpose
 
@@ -11,20 +11,20 @@ Version 1 authenticates:
 - A member’s display name
 - A variable-length set of externally defined flags
 
-It uses BLS signatures over BLS12-381 in the minimal-signature-size variant.
+Names are encoded with `namecompress` against a separately distributed model. Credentials use BLS signatures over BLS12-381 in the minimal-signature-size variant.
 
 ## 2. Binary representation
 
 ```text
-+--------+------------------+-----------+------------+---------------+
-| Header | Extended length? | Flag data | UTF-8 name | BLS signature |
-| 1 byte | 0 or 1 byte      | F bytes   | N bytes    | 48 bytes      |
-+--------+------------------+-----------+------------+---------------+
++--------+------------------+-----------+-----------------+---------------+
+| Header | Extended length? | Flag data | Compressed name | BLS signature |
+| 1 byte | 0 or 1 byte      | F bytes   | C bytes         | 48 bytes      |
++--------+------------------+-----------+-----------------+---------------+
 ```
 
 The extended-length byte is present only when indicated by the header.
 
-No name-length field is encoded. The name extends from the end of the flag data to the beginning of the fixed-length signature.
+No compressed-name-length field is encoded. The compressed name extends from the end of the flag data to the beginning of the fixed-length signature.
 
 ## 3. Header
 
@@ -43,7 +43,7 @@ Version zero is reserved.
 
 ### Key ID
 
-Bits 4–2 contain a Key ID from 0 through 7. The identifier selects a compressed BLS12-381 G2 public key configured out of band in the verifier.
+Bits 4–2 contain a Key ID from 0 through 7. The identifier selects an issuer configuration containing both a compressed BLS12-381 G2 public key and a `namecompress` model. Both are configured out of band in the verifier.
 
 ### Flag-size code
 
@@ -90,11 +90,11 @@ The meaning of each flag is defined by an external issuer profile. Once assigned
 
 Unknown flags MAY be ignored, but MUST NOT cause a verifier to grant an authorization it does not understand.
 
-## 5. Name
+## 5. Compressed name
 
-The name consists of every byte following the flag data and preceding the final 48-byte signature.
+The compressed-name field consists of every byte following the flag data and preceding the final 48-byte signature. These bytes are a `namecompress` message and are not UTF-8.
 
-The name:
+Before compression, the display name:
 
 - MUST contain between 1 and 255 bytes.
 - MUST be valid UTF-8.
@@ -102,7 +102,9 @@ The name:
 - MUST NOT contain control characters.
 - MUST be encoded exactly as intended for display.
 
-A verifier MUST NOT normalize or modify the name before verifying the signature.
+The encoder MUST encode the exact display-name string with `namecompress::compress` and the model associated with the Key ID. The model's fingerprint is its `name_model_id` and SHOULD be distributed with the issuer's public-key metadata.
+
+A verifier MUST use the model associated with the Key ID to decompress the field. Decompression failure, including a `namecompress` wrong-table check, makes the credential invalid. A verifier MUST NOT normalize or modify the decompressed name. It MUST validate and display the name only after successful signature verification and decompression.
 
 ## 6. Signature
 
@@ -125,7 +127,7 @@ digital-membership/v1\x00
 Let `unsigned_credential` be every transmitted byte except the trailing signature:
 
 ```text
-header || extended_flag_length? || flags || name
+header || extended_flag_length? || flags || compressed_name
 ```
 
 The signed message is:
@@ -152,11 +154,12 @@ Given a credential containing `L` bytes, a verifier MUST:
 4. Determine the flag-data length.
 5. Reject non-minimal or out-of-bounds flag encodings.
 6. Interpret the flag bytes as a bitset.
-7. Treat all remaining unsigned bytes as the UTF-8 name.
-8. Resolve the Key ID to a trusted public key and validate that it is a canonical, non-identity point in the correct subgroup of G2.
+7. Treat all remaining unsigned bytes as the compressed name.
+8. Resolve the Key ID to a trusted public key and `namecompress` model, and validate that the public key is a canonical, non-identity point in the correct subgroup of G2.
 9. Validate that the signature is a canonical, non-identity point in the correct subgroup of G1.
 10. Verify the signature over the domain prefix and unsigned credential using the specified ciphersuite.
-11. Validate and display the name only after successful verification.
+11. Decompress the name with the model associated with the Key ID and reject any decompression error.
+12. Validate and display the decompressed name only after successful verification.
 
 All arithmetic and bounds checks MUST be completed before slicing the input.
 
@@ -165,19 +168,19 @@ All arithmetic and bounds checks MUST be completed before slicing the input.
 The credential size is:
 
 ```text
-1 + E + F + N + 48 bytes
+1 + E + F + C + 48 bytes
 ```
 
 Where:
 
 - `E` is 1 for extended flag lengths and otherwise 0.
 - `F` is the number of flag bytes.
-- `N` is the UTF-8 name length.
+- `C` is the compressed-name length.
 
-A 20-byte name with two flag bytes produces:
+For example, a name that compresses to six bytes with two flag bytes produces:
 
 ```text
-1 + 0 + 2 + 20 + 48 = 71 bytes
+1 + 0 + 2 + 6 + 48 = 57 bytes
 ```
 
 ## 9. Example
@@ -188,7 +191,8 @@ Suppose:
 - Key ID is 2.
 - One flag byte is present.
 - Flags 0 and 5 are asserted.
-- The name is `Alice`.
+- The name is `John Smith`.
+- The configured `namecompress` model encodes it as `C[0]` through `C[n-1]`.
 
 The header is:
 
@@ -199,15 +203,15 @@ The header is:
 The unsigned credential is:
 
 ```text
-29 21 41 6c 69 63 65
-│  │  └───────────── UTF-8 "Alice"
-│  └──────────────── flags 0 and 5
-└─────────────────── version 1, key 2, one flag byte
+29 21 C[0] ... C[n-1]
+│  │  └────────────── compressed `namecompress` message
+│  └───────────────── flags 0 and 5
+└──────────────────── version 1, key 2, one flag byte
 ```
 
 The 48-byte compressed BLS signature follows these bytes.
 
-The complete credential is 55 bytes.
+The complete credential is `2 + n + 48` bytes.
 
 ## 10. QR transport
 
@@ -217,7 +221,7 @@ Text armoring required by another transport is a separate encoding layer and is 
 
 ## 11. Security and privacy considerations
 
-The signature authenticates the name and flags but provides no confidentiality. Anyone who scans or photographs the QR code can read them.
+The signature authenticates the compressed name and flags but provides no confidentiality. Compression is not encryption: anyone who obtains the QR code and the separately distributed model can recover the display name and flags.
 
 Dietary requirements, political affiliations, protected-group membership, and similar flags may constitute sensitive personal information. Issuers should include only information required at the point of scanning.
 
