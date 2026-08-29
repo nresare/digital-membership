@@ -13,15 +13,18 @@ use namecompress::Table;
 use qrcode_generator::Renderer;
 use qrcode_generator::qr::{Encoder, ErrorCorrection};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
+use xz2::read::XzDecoder;
 
 use crate::credential::{BLS_CIPHERSUITE, encode_credential};
 use crate::error::AppError;
 
 const KEY_ID: u8 = 0;
 const QR_IMAGE_SIZE: usize = 768;
+const XZ_MAGIC: &[u8] = b"\xfd7zXZ\0";
 
 #[cfg(test)]
 fn test_name_model() -> Table {
@@ -53,12 +56,24 @@ pub struct AppState {
 
 impl AppState {
     pub fn generate(name_model_path: &Path) -> anyhow::Result<Self> {
-        let name_model_bytes = std::fs::read(name_model_path).map_err(|error| {
+        let mut name_model_bytes = std::fs::read(name_model_path).map_err(|error| {
             anyhow::anyhow!(
                 "failed to read name model '{}': {error}",
                 name_model_path.display()
             )
         })?;
+        if name_model_bytes.starts_with(XZ_MAGIC) {
+            let mut decompressed = Vec::new();
+            XzDecoder::new(name_model_bytes.as_slice())
+                .read_to_end(&mut decompressed)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to decompress xz name model '{}': {error}",
+                        name_model_path.display()
+                    )
+                })?;
+            name_model_bytes = decompressed;
+        }
         let name_model = Table::load(&name_model_bytes).map_err(|error| {
             anyhow::anyhow!(
                 "failed to load name model '{}': {error}",
@@ -298,6 +313,26 @@ mod tests {
             std::process::id()
         ));
         std::fs::write(&path, model.write()).unwrap();
+
+        let state = AppState::generate(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(state.name_model.id, model.id);
+    }
+
+    #[test]
+    fn loads_xz_compressed_name_model() {
+        use std::io::Write;
+        use xz2::write::XzEncoder;
+
+        let model = test_name_model();
+        let path = std::env::temp_dir().join(format!(
+            "digital-membership-name-model-{}.ncmp.xz",
+            std::process::id()
+        ));
+        let mut encoder = XzEncoder::new(Vec::new(), 6);
+        encoder.write_all(&model.write()).unwrap();
+        std::fs::write(&path, encoder.finish().unwrap()).unwrap();
 
         let state = AppState::generate(&path).unwrap();
         std::fs::remove_file(path).unwrap();
