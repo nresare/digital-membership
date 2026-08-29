@@ -51,6 +51,44 @@ the specification's 255-byte flag-data limit.
 
 Names must contain 1–255 UTF-8 bytes and may not contain control characters.
 
+### Generate an Apple Wallet pass
+
+Wallet support is optional. Configure it with a Pass Type signing identity exported as
+PKCS#12, the Apple Worldwide Developer Relations intermediate certificate, and the
+identifiers from the Apple Developer portal:
+
+```bash
+export DIGITAL_MEMBERSHIP_WALLET_P12_PASSWORD='the export password'
+cargo run -- \
+  --bind-address 127.0.0.1:8080 \
+  --name-model /path/to/names.ncmp \
+  --wallet-pkcs12 /path/to/pass-identity.p12 \
+  --wallet-wwdr-certificate /path/to/AppleWWDR.cer \
+  --wallet-pass-type-identifier pass.example.digital-membership \
+  --wallet-team-identifier ABCDE12345 \
+  --wallet-organization-name 'Example Membership'
+```
+
+The PKCS#12 password defaults to an empty string when
+`DIGITAL_MEMBERSHIP_WALLET_P12_PASSWORD` is unset. All four Wallet options other than
+the organization name must be supplied together. The certificate may be PEM or DER.
+
+Once configured, `GET /api/wallet` accepts the same query parameters as `GET /api/qr`:
+
+```text
+https://example.com/api/wallet?name=Alice%20Smith&flags=0,5,9
+```
+
+It returns a signed `application/vnd.apple.pkpass` download. Opening the URL in Safari
+on an iPhone presents the pass for addition to Apple Wallet. Wallet renders the QR code
+from the same binary credential used by `/api/qr`; the pass does not contain a separate
+QR image. Generated passes currently use a plain built-in placeholder icon and do not
+support push updates.
+
+If Wallet support is not configured, the endpoint returns HTTP 503. In a production
+deployment, avoid putting personal details directly in a URL: use an authenticated,
+opaque enrollment URL that resolves to the name and flags on the server.
+
 ### Read scanner configuration
 
 `GET /api/provision` returns the current startup-generated verification key and the

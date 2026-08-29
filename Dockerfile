@@ -8,6 +8,9 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM rust:slim-trixie AS builder
 WORKDIR /build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends make perl \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=planner /bin/cargo-chef /bin/cargo-chef
 COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
