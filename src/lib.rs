@@ -1,9 +1,10 @@
 mod credential;
 mod error;
+mod wallet;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{RawQuery, State};
-use axum::http::{Response, StatusCode, header};
+use axum::http::{HeaderValue, Response, StatusCode, header};
 use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
@@ -22,6 +23,9 @@ use xz2::write::XzEncoder;
 
 use crate::credential::{BLS_CIPHERSUITE, encode_credential};
 use crate::error::AppError;
+use crate::wallet::WalletPass;
+
+pub use crate::wallet::WalletConfig;
 
 const KEY_ID: u8 = 0;
 const QR_IMAGE_SIZE: usize = 768;
@@ -55,10 +59,18 @@ pub struct AppState {
     signing_key: Arc<SecretKey>,
     name_model: Arc<Table>,
     compressed_name_model: Arc<[u8]>,
+    wallet: Option<Arc<WalletPass>>,
 }
 
 impl AppState {
     pub fn generate(name_model_path: &Path) -> anyhow::Result<Self> {
+        Self::generate_with_wallet(name_model_path, None)
+    }
+
+    pub fn generate_with_wallet(
+        name_model_path: &Path,
+        wallet_config: Option<WalletConfig>,
+    ) -> anyhow::Result<Self> {
         let configured_name_model = std::fs::read(name_model_path).map_err(|error| {
             anyhow::anyhow!(
                 "failed to read name model '{}': {error}",
@@ -105,10 +117,15 @@ impl AppState {
             .map_err(|error| anyhow::anyhow!("failed to generate signing key material: {error}"))?;
         let signing_key = SecretKey::key_gen_v5(&ikm, &[], &[])
             .map_err(|error| anyhow::anyhow!("failed to generate BLS signing key: {error:?}"))?;
+        let wallet = wallet_config
+            .map(WalletPass::load)
+            .transpose()?
+            .map(Arc::new);
         Ok(Self {
             signing_key: Arc::new(signing_key),
             name_model: Arc::new(name_model),
             compressed_name_model: compressed_name_model.into(),
+            wallet,
         })
     }
 
@@ -121,6 +138,7 @@ impl AppState {
             signing_key: Arc::new(signing_key),
             name_model: Arc::new(name_model),
             compressed_name_model: compressed_name_model.into(),
+            wallet: None,
         }
     }
 }
@@ -129,6 +147,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/api/healthz", get(healthz))
         .route("/api/qr", get(qr_code_get).post(qr_code_post))
+        .route("/api/wallet", get(wallet_pass_get))
         .route("/api/provision", get(provision))
         .route(NAME_MODEL_URL, get(name_model))
         .layer(TraceLayer::new_for_http())
@@ -200,13 +219,7 @@ fn parse_qr_query(query: Option<&str>) -> Result<QrRequest, AppError> {
 }
 
 fn generate_qr_code(state: &AppState, request: QrRequest) -> Result<Response<Body>, AppError> {
-    let credential = encode_credential(
-        &request.name,
-        &request.flags,
-        KEY_ID,
-        state.name_model.as_ref(),
-        state.signing_key.as_ref(),
-    )?;
+    let credential = generate_credential(state, &request)?;
     let symbol = Encoder::new(ErrorCorrection::Medium)
         .encode_bytes(&credential)
         .map_err(|error| AppError::Internal(format!("failed to encode QR code: {error}")))?;
@@ -218,6 +231,40 @@ fn generate_qr_code(state: &AppState, request: QrRequest) -> Result<Response<Bod
         .header(header::CONTENT_TYPE, "image/png")
         .body(Body::from(png))
         .map_err(|error| AppError::Internal(format!("failed to build response: {error}")))
+}
+
+async fn wallet_pass_get(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+) -> Result<Response<Body>, AppError> {
+    let request = parse_qr_query(query.as_deref())?;
+    let wallet = state.wallet.as_ref().ok_or_else(|| {
+        AppError::Unavailable("Apple Wallet support is not configured".to_string())
+    })?;
+    let credential = generate_credential(&state, &request)?;
+    let pass = wallet
+        .build(&request.name, &credential)
+        .map_err(|error| AppError::Internal(format!("failed to build Wallet pass: {error:#}")))?;
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/vnd.apple.pkpass")
+        .header(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=membership.pkpass"),
+        )
+        .header(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))
+        .body(Body::from(pass))
+        .map_err(|error| AppError::Internal(format!("failed to build response: {error}")))
+}
+
+fn generate_credential(state: &AppState, request: &QrRequest) -> Result<Vec<u8>, AppError> {
+    encode_credential(
+        &request.name,
+        &request.flags,
+        KEY_ID,
+        state.name_model.as_ref(),
+        state.signing_key.as_ref(),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -316,6 +363,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn wallet_endpoint_reports_missing_configuration() {
+        let response = test_app()
+            .oneshot(
+                Request::get("/api/wallet?name=Alice")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
