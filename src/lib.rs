@@ -1,7 +1,7 @@
 mod credential;
 mod error;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{RawQuery, State};
 use axum::http::{Response, StatusCode, header};
 use axum::routing::get;
@@ -13,17 +13,19 @@ use namecompress::Table;
 use qrcode_generator::Renderer;
 use qrcode_generator::qr::{Encoder, ErrorCorrection};
 use serde::{Deserialize, Serialize};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use xz2::read::XzDecoder;
+use xz2::write::XzEncoder;
 
 use crate::credential::{BLS_CIPHERSUITE, encode_credential};
 use crate::error::AppError;
 
 const KEY_ID: u8 = 0;
 const QR_IMAGE_SIZE: usize = 768;
+const NAME_MODEL_URL: &str = "/api/model/model.ncmp.xz";
 const XZ_MAGIC: &[u8] = b"\xfd7zXZ\0";
 
 #[cfg(test)]
@@ -52,28 +54,45 @@ fn test_name_model() -> Table {
 pub struct AppState {
     signing_key: Arc<SecretKey>,
     name_model: Arc<Table>,
+    compressed_name_model: Arc<[u8]>,
 }
 
 impl AppState {
     pub fn generate(name_model_path: &Path) -> anyhow::Result<Self> {
-        let mut name_model_bytes = std::fs::read(name_model_path).map_err(|error| {
+        let configured_name_model = std::fs::read(name_model_path).map_err(|error| {
             anyhow::anyhow!(
                 "failed to read name model '{}': {error}",
                 name_model_path.display()
             )
         })?;
-        if name_model_bytes.starts_with(XZ_MAGIC) {
-            let mut decompressed = Vec::new();
-            XzDecoder::new(name_model_bytes.as_slice())
-                .read_to_end(&mut decompressed)
-                .map_err(|error| {
+        let (name_model_bytes, compressed_name_model) =
+            if configured_name_model.starts_with(XZ_MAGIC) {
+                let mut decompressed = Vec::new();
+                XzDecoder::new(configured_name_model.as_slice())
+                    .read_to_end(&mut decompressed)
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "failed to decompress xz name model '{}': {error}",
+                            name_model_path.display()
+                        )
+                    })?;
+                (decompressed, configured_name_model)
+            } else {
+                let mut encoder = XzEncoder::new(Vec::new(), 6);
+                encoder.write_all(&configured_name_model).map_err(|error| {
                     anyhow::anyhow!(
-                        "failed to decompress xz name model '{}': {error}",
+                        "failed to compress name model '{}': {error}",
                         name_model_path.display()
                     )
                 })?;
-            name_model_bytes = decompressed;
-        }
+                let compressed = encoder.finish().map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to finish compressing name model '{}': {error}",
+                        name_model_path.display()
+                    )
+                })?;
+                (configured_name_model, compressed)
+            };
         let name_model = Table::load(&name_model_bytes).map_err(|error| {
             anyhow::anyhow!(
                 "failed to load name model '{}': {error}",
@@ -89,23 +108,29 @@ impl AppState {
         Ok(Self {
             signing_key: Arc::new(signing_key),
             name_model: Arc::new(name_model),
+            compressed_name_model: compressed_name_model.into(),
         })
     }
 
     #[cfg(test)]
     fn from_signing_key(signing_key: SecretKey, name_model: Table) -> Self {
+        let mut encoder = XzEncoder::new(Vec::new(), 6);
+        encoder.write_all(&name_model.write()).unwrap();
+        let compressed_name_model = encoder.finish().unwrap();
         Self {
             signing_key: Arc::new(signing_key),
             name_model: Arc::new(name_model),
+            compressed_name_model: compressed_name_model.into(),
         }
     }
 }
 
 pub fn app(state: AppState) -> Router {
     Router::new()
-        .route("/healthz", get(healthz))
-        .route("/qr", get(qr_code_get).post(qr_code_post))
-        .route("/public-key", get(public_key))
+        .route("/api/healthz", get(healthz))
+        .route("/api/qr", get(qr_code_get).post(qr_code_post))
+        .route("/api/provision", get(provision))
+        .route(NAME_MODEL_URL, get(name_model))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -196,31 +221,42 @@ fn generate_qr_code(state: &AppState, request: QrRequest) -> Result<Response<Bod
 }
 
 #[derive(Debug, Serialize)]
-struct PublicKeyResponse {
+struct ProvisionResponse {
     algorithm: &'static str,
     key_id: u8,
     name_model_id: u32,
+    name_model_url: &'static str,
     public_key: String,
 }
 
-async fn public_key(State(state): State<AppState>) -> Json<PublicKeyResponse> {
-    Json(PublicKeyResponse {
+async fn provision(State(state): State<AppState>) -> Json<ProvisionResponse> {
+    Json(ProvisionResponse {
         algorithm: BLS_CIPHERSUITE,
         key_id: KEY_ID,
         name_model_id: state.name_model.id,
+        name_model_url: NAME_MODEL_URL,
         public_key: URL_SAFE_NO_PAD.encode(state.signing_key.sk_to_pk().to_bytes()),
     })
 }
 
+async fn name_model(State(state): State<AppState>) -> Response<Body> {
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/x-xz")
+        .body(Body::from(Bytes::from_owner(state.compressed_name_model)))
+        .expect("static name model response is valid")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AppState, app, parse_qr_query, test_name_model};
+    use super::{AppState, XZ_MAGIC, app, parse_qr_query, test_name_model};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use blst::min_sig::SecretKey;
+    use std::io::Read;
     use tower::ServiceExt;
+    use xz2::read::XzDecoder;
 
     fn test_app() -> axum::Router {
         app(AppState::from_signing_key(
@@ -233,7 +269,7 @@ mod tests {
     async fn post_returns_png() {
         let response = test_app()
             .oneshot(
-                Request::post("/qr")
+                Request::post("/api/qr")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"name":"Alice","flags":[0,5,9]}"#))
                     .unwrap(),
@@ -251,7 +287,7 @@ mod tests {
     async fn get_returns_png_for_url_encoded_query() {
         let response = test_app()
             .oneshot(
-                Request::get("/qr?name=Alice+Smith&flags=0%2C5&flags=9")
+                Request::get("/api/qr?name=Alice+Smith&flags=0%2C5&flags=9")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -275,7 +311,7 @@ mod tests {
     #[tokio::test]
     async fn get_rejects_missing_name() {
         let response = test_app()
-            .oneshot(Request::get("/qr?flags=0").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/api/qr?flags=0").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -283,9 +319,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exposes_public_key() {
+    async fn exposes_provisioning_metadata() {
         let response = test_app()
-            .oneshot(Request::get("/public-key").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/api/provision").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -295,6 +331,7 @@ mod tests {
         assert!(body.contains(r#""algorithm":"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_""#));
         assert!(body.contains(r#""key_id":0"#));
         assert!(body.contains(r#""name_model_id":"#));
+        assert!(body.contains(r#""name_model_url":"/api/model/model.ncmp.xz""#));
         let public_key = body
             .split_once(r#""public_key":""#)
             .unwrap()
@@ -303,6 +340,30 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(URL_SAFE_NO_PAD.decode(public_key).unwrap().len(), 96);
+    }
+
+    #[tokio::test]
+    async fn serves_name_model_referenced_by_provisioning_metadata() {
+        let expected_model = test_name_model();
+        let response = test_app()
+            .oneshot(
+                Request::get("/api/model/model.ncmp.xz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/x-xz");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body.starts_with(XZ_MAGIC));
+        let mut decompressed = Vec::new();
+        XzDecoder::new(body.as_ref())
+            .read_to_end(&mut decompressed)
+            .unwrap();
+        let downloaded_model = namecompress::Table::load(&decompressed).unwrap();
+        assert_eq!(downloaded_model.id, expected_model.id);
     }
 
     #[test]
@@ -318,6 +379,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
 
         assert_eq!(state.name_model.id, model.id);
+        assert!(state.compressed_name_model.starts_with(XZ_MAGIC));
     }
 
     #[test]
@@ -332,19 +394,21 @@ mod tests {
         ));
         let mut encoder = XzEncoder::new(Vec::new(), 6);
         encoder.write_all(&model.write()).unwrap();
-        std::fs::write(&path, encoder.finish().unwrap()).unwrap();
+        let compressed = encoder.finish().unwrap();
+        std::fs::write(&path, &compressed).unwrap();
 
         let state = AppState::generate(&path).unwrap();
         std::fs::remove_file(path).unwrap();
 
         assert_eq!(state.name_model.id, model.id);
+        assert_eq!(state.compressed_name_model.as_ref(), compressed);
     }
 
     #[tokio::test]
     async fn rejects_invalid_credential_input() {
         let response = test_app()
             .oneshot(
-                Request::post("/qr")
+                Request::post("/api/qr")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"name":"","flags":[]}"#))
                     .unwrap(),

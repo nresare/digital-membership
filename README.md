@@ -23,21 +23,22 @@ distributed model to decode names from credentials.
 
 ### Generate a QR code
 
-`POST /qr` accepts JSON with a required `name` and an optional array of numeric `flags`:
+`POST /api/qr` accepts JSON with a required `name` and an optional array of numeric
+`flags`:
 
 ```bash
-curl -sS http://127.0.0.1:8080/qr \
+curl -sS http://127.0.0.1:8080/api/qr \
   -H 'content-type: application/json' \
   -d '{"name":"Alice","flags":[0,5,9]}' \
   --output membership.png
 ```
 
-For easy use in a web browser, `GET /qr` accepts the same values as URL-encoded query
-parameters. Flags may be repeated or supplied as a comma-separated list:
+For easy use in a web browser, `GET /api/qr` accepts the same values as URL-encoded
+query parameters. Flags may be repeated or supplied as a comma-separated list:
 
 ```text
-http://127.0.0.1:8080/qr?name=Alice%20Smith&flags=0,5,9
-http://127.0.0.1:8080/qr?name=Alice%20Smith&flags=0&flags=5&flags=9
+http://127.0.0.1:8080/api/qr?name=Alice%20Smith&flags=0,5,9
+http://127.0.0.1:8080/api/qr?name=Alice%20Smith&flags=0&flags=5&flags=9
 ```
 
 The `flags` parameter may be omitted entirely when no flags are asserted.
@@ -50,15 +51,17 @@ the specification's 255-byte flag-data limit.
 
 Names must contain 1–255 UTF-8 bytes and may not contain control characters.
 
-### Read the public key
+### Read scanner configuration
 
-`GET /public-key` returns the current startup-generated verification key:
+`GET /api/provision` returns the current startup-generated verification key and the
+location of the name model needed to decode credentials:
 
 ```json
 {
   "algorithm": "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_",
   "key_id": 0,
   "name_model_id": 1234567890,
+  "name_model_url": "/api/model/model.ncmp.xz",
   "public_key": "<base64url without padding>"
 }
 ```
@@ -69,6 +72,11 @@ URL-safe Base64. Credentials contain 48-byte compressed G1 signatures and use ke
 verifiers can use it to confirm that the model associated with this key is the expected
 one.
 
+`name_model_url` is relative to the service origin. `GET /api/model/model.ncmp.xz`
+returns the validated model as an XZ-compressed `application/x-xz` response. The
+downloaded model's fingerprint after decompression will match `name_model_id`. An
+uncompressed startup model is compressed once when the service starts.
+
 ### Health check
 
-`GET /healthz` returns HTTP 200 while the service is running.
+`GET /api/healthz` returns HTTP 200 while the service is running.
