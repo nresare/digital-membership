@@ -373,7 +373,9 @@ mod tests {
             "digital-membership-name-model-{}.ncmp",
             std::process::id()
         ));
-        std::fs::write(&path, model.write()).unwrap();
+        let model_bytes = model.write();
+        assert_eq!(&model_bytes[..6], b"NCMP\x01\0");
+        std::fs::write(&path, model_bytes).unwrap();
 
         let state = AppState::generate(&path).unwrap();
         std::fs::remove_file(path).unwrap();

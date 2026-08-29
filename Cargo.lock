@@ -738,9 +738,9 @@ dependencies = [
 
 [[package]]
 name = "namecompress"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a828b6320ca812aec034948c023c702ab5b50acddd895e7a0ac8adaa093abb31"
+checksum = "67dffc0fc603a18af49076c1382471af16bff5689f39f858754de09da110b5a6"
 
 [[package]]
 name = "nix"
