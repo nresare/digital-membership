@@ -9,9 +9,11 @@ use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use blst::min_sig::SecretKey;
+use namecompress::Table;
 use qrcode_generator::Renderer;
 use qrcode_generator::qr::{Encoder, ErrorCorrection};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
@@ -21,13 +23,49 @@ use crate::error::AppError;
 const KEY_ID: u8 = 0;
 const QR_IMAGE_SIZE: usize = 768;
 
+#[cfg(test)]
+fn test_name_model() -> Table {
+    use namecompress::TableBuilder;
+    use namecompress::chars::{Alphabet, CharModelBuilder};
+
+    let alphabet = Alphabet::new("abcdefghijklmnopqrstuvwxyz -'".chars().collect()).unwrap();
+    let mut builder = CharModelBuilder::new(alphabet.symbols());
+    for name in ["alice", "john", "smith", "jones"] {
+        builder.train(&alphabet.encode(name).unwrap(), 100);
+    }
+    TableBuilder {
+        given: vec![("Alice".into(), 300), ("John".into(), 500)],
+        given_escape: 100,
+        surname: vec![("Smith".into(), 400), ("Jones".into(), 200)],
+        surname_escape: 100,
+        alphabet,
+        chars: builder.build(0),
+        check_modulus: 256,
+    }
+    .finish()
+}
+
 #[derive(Clone)]
 pub struct AppState {
     signing_key: Arc<SecretKey>,
+    name_model: Arc<Table>,
 }
 
 impl AppState {
-    pub fn generate() -> anyhow::Result<Self> {
+    pub fn generate(name_model_path: &Path) -> anyhow::Result<Self> {
+        let name_model_bytes = std::fs::read(name_model_path).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to read name model '{}': {error}",
+                name_model_path.display()
+            )
+        })?;
+        let name_model = Table::load(&name_model_bytes).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to load name model '{}': {error}",
+                name_model_path.display()
+            )
+        })?;
+
         let mut ikm = [0_u8; 32];
         getrandom::fill(&mut ikm)
             .map_err(|error| anyhow::anyhow!("failed to generate signing key material: {error}"))?;
@@ -35,13 +73,15 @@ impl AppState {
             .map_err(|error| anyhow::anyhow!("failed to generate BLS signing key: {error:?}"))?;
         Ok(Self {
             signing_key: Arc::new(signing_key),
+            name_model: Arc::new(name_model),
         })
     }
 
     #[cfg(test)]
-    fn from_signing_key(signing_key: SecretKey) -> Self {
+    fn from_signing_key(signing_key: SecretKey, name_model: Table) -> Self {
         Self {
             signing_key: Arc::new(signing_key),
+            name_model: Arc::new(name_model),
         }
     }
 }
@@ -124,6 +164,7 @@ fn generate_qr_code(state: &AppState, request: QrRequest) -> Result<Response<Bod
         &request.name,
         &request.flags,
         KEY_ID,
+        state.name_model.as_ref(),
         state.signing_key.as_ref(),
     )?;
     let symbol = Encoder::new(ErrorCorrection::Medium)
@@ -143,6 +184,7 @@ fn generate_qr_code(state: &AppState, request: QrRequest) -> Result<Response<Bod
 struct PublicKeyResponse {
     algorithm: &'static str,
     key_id: u8,
+    name_model_id: u32,
     public_key: String,
 }
 
@@ -150,13 +192,14 @@ async fn public_key(State(state): State<AppState>) -> Json<PublicKeyResponse> {
     Json(PublicKeyResponse {
         algorithm: BLS_CIPHERSUITE,
         key_id: KEY_ID,
+        name_model_id: state.name_model.id,
         public_key: URL_SAFE_NO_PAD.encode(state.signing_key.sk_to_pk().to_bytes()),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, app, parse_qr_query};
+    use super::{AppState, app, parse_qr_query, test_name_model};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
     use base64::Engine;
@@ -167,6 +210,7 @@ mod tests {
     fn test_app() -> axum::Router {
         app(AppState::from_signing_key(
             SecretKey::key_gen_v5(&[7_u8; 32], &[], &[]).unwrap(),
+            test_name_model(),
         ))
     }
 
@@ -235,6 +279,7 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains(r#""algorithm":"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_""#));
         assert!(body.contains(r#""key_id":0"#));
+        assert!(body.contains(r#""name_model_id":"#));
         let public_key = body
             .split_once(r#""public_key":""#)
             .unwrap()
@@ -243,6 +288,21 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(URL_SAFE_NO_PAD.decode(public_key).unwrap().len(), 96);
+    }
+
+    #[test]
+    fn loads_configured_name_model() {
+        let model = test_name_model();
+        let path = std::env::temp_dir().join(format!(
+            "digital-membership-name-model-{}.ncmp",
+            std::process::id()
+        ));
+        std::fs::write(&path, model.write()).unwrap();
+
+        let state = AppState::generate(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(state.name_model.id, model.id);
     }
 
     #[tokio::test]
