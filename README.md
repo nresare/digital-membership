@@ -14,9 +14,10 @@ cargo run -- \
 ```
 
 `--name-model` is required and must identify a model table produced for the
-[`namecompress`](https://github.com/nresare/namecompress) crate. The service loads and
-validates the model at startup. Verifiers need the same separately distributed model
-to decode names from credentials.
+[`namecompress`](https://github.com/nresare/namecompress) crate. The model may be
+uncompressed or XZ-compressed; compression is detected from the file contents. The
+service loads and validates the model at startup. Verifiers need the same separately
+distributed model to decode names from credentials.
 
 ## API
 
