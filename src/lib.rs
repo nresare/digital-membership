@@ -8,14 +8,14 @@ use axum::routing::get;
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use ed25519_dalek::SigningKey;
+use blst::min_sig::SecretKey;
 use qrcode_generator::Renderer;
 use qrcode_generator::qr::{Encoder, ErrorCorrection};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 
-use crate::credential::encode_credential;
+use crate::credential::{BLS_CIPHERSUITE, encode_credential};
 use crate::error::AppError;
 
 const KEY_ID: u8 = 0;
@@ -23,21 +23,23 @@ const QR_IMAGE_SIZE: usize = 768;
 
 #[derive(Clone)]
 pub struct AppState {
-    signing_key: Arc<SigningKey>,
+    signing_key: Arc<SecretKey>,
 }
 
 impl AppState {
     pub fn generate() -> anyhow::Result<Self> {
-        let mut secret = [0_u8; 32];
-        getrandom::fill(&mut secret)
-            .map_err(|error| anyhow::anyhow!("failed to generate signing key: {error}"))?;
+        let mut ikm = [0_u8; 32];
+        getrandom::fill(&mut ikm)
+            .map_err(|error| anyhow::anyhow!("failed to generate signing key material: {error}"))?;
+        let signing_key = SecretKey::key_gen_v5(&ikm, &[], &[])
+            .map_err(|error| anyhow::anyhow!("failed to generate BLS signing key: {error:?}"))?;
         Ok(Self {
-            signing_key: Arc::new(SigningKey::from_bytes(&secret)),
+            signing_key: Arc::new(signing_key),
         })
     }
 
     #[cfg(test)]
-    fn from_signing_key(signing_key: SigningKey) -> Self {
+    fn from_signing_key(signing_key: SecretKey) -> Self {
         Self {
             signing_key: Arc::new(signing_key),
         }
@@ -146,9 +148,9 @@ struct PublicKeyResponse {
 
 async fn public_key(State(state): State<AppState>) -> Json<PublicKeyResponse> {
     Json(PublicKeyResponse {
-        algorithm: "Ed25519",
+        algorithm: BLS_CIPHERSUITE,
         key_id: KEY_ID,
-        public_key: URL_SAFE_NO_PAD.encode(state.signing_key.verifying_key().as_bytes()),
+        public_key: URL_SAFE_NO_PAD.encode(state.signing_key.sk_to_pk().to_bytes()),
     })
 }
 
@@ -157,13 +159,15 @@ mod tests {
     use super::{AppState, app, parse_qr_query};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
-    use ed25519_dalek::SigningKey;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use blst::min_sig::SecretKey;
     use tower::ServiceExt;
 
     fn test_app() -> axum::Router {
-        app(AppState::from_signing_key(SigningKey::from_bytes(
-            &[7_u8; 32],
-        )))
+        app(AppState::from_signing_key(
+            SecretKey::key_gen_v5(&[7_u8; 32], &[], &[]).unwrap(),
+        ))
     }
 
     #[tokio::test]
@@ -229,9 +233,16 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains(r#""algorithm":"Ed25519""#));
+        assert!(body.contains(r#""algorithm":"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_""#));
         assert!(body.contains(r#""key_id":0"#));
-        assert!(body.contains(r#""public_key":""#));
+        let public_key = body
+            .split_once(r#""public_key":""#)
+            .unwrap()
+            .1
+            .split_once('"')
+            .unwrap()
+            .0;
+        assert_eq!(URL_SAFE_NO_PAD.decode(public_key).unwrap().len(), 96);
     }
 
     #[tokio::test]

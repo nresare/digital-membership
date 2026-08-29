@@ -1,6 +1,6 @@
 # Digital Membership Binary Format
 
-Draft version 0.2
+Draft version 0.3
 
 ## 1. Purpose
 
@@ -11,15 +11,15 @@ Version 1 authenticates:
 - A member’s display name
 - A variable-length set of externally defined flags
 
-It uses Ed25519 signatures.
+It uses BLS signatures over BLS12-381 in the minimal-signature-size variant.
 
 ## 2. Binary representation
 
 ```text
-+--------+------------------+-----------+------------+-------------------+
-| Header | Extended length? | Flag data | UTF-8 name | Ed25519 signature |
-| 1 byte | 0 or 1 byte      | F bytes   | N bytes    | 64 bytes          |
-+--------+------------------+-----------+------------+-------------------+
++--------+------------------+-----------+------------+---------------+
+| Header | Extended length? | Flag data | UTF-8 name | BLS signature |
+| 1 byte | 0 or 1 byte      | F bytes   | N bytes    | 48 bytes      |
++--------+------------------+-----------+------------+---------------+
 ```
 
 The extended-length byte is present only when indicated by the header.
@@ -43,7 +43,7 @@ Version zero is reserved.
 
 ### Key ID
 
-Bits 4–2 contain a Key ID from 0 through 7. The identifier selects an Ed25519 public key configured out of band in the verifier.
+Bits 4–2 contain a Key ID from 0 through 7. The identifier selects a compressed BLS12-381 G2 public key configured out of band in the verifier.
 
 ### Flag-size code
 
@@ -92,7 +92,7 @@ Unknown flags MAY be ignored, but MUST NOT cause a verifier to grant an authoriz
 
 ## 5. Name
 
-The name consists of every byte following the flag data and preceding the final 64-byte signature.
+The name consists of every byte following the flag data and preceding the final 48-byte signature.
 
 The name:
 
@@ -106,7 +106,15 @@ A verifier MUST NOT normalize or modify the name before verifying the signature.
 
 ## 6. Signature
 
-Ed25519 is used as specified in [RFC 8032](https://www.rfc-editor.org/rfc/rfc8032.html).
+BLS signatures are used as specified in [draft-irtf-cfrg-bls-signature](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bls-signature/).
+
+The ciphersuite is the Basic scheme over BLS12-381 using SHA-256 and the minimal-signature-size variant:
+
+```text
+BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_
+```
+
+Signatures MUST use the canonical 48-byte compressed representation of a point in G1. Public keys MUST use the canonical 96-byte compressed representation of a point in G2.
 
 The fixed domain-separation prefix is the following ASCII byte string, including the terminating zero byte:
 
@@ -129,7 +137,7 @@ The signed message is:
 The complete credential is:
 
 ```text
-unsigned_credential || Ed25519.Sign(private_key, signed_message)
+unsigned_credential || BLS.Sign(private_key, signed_message)
 ```
 
 The domain-separation prefix is not transmitted.
@@ -138,16 +146,17 @@ The domain-separation prefix is not transmitted.
 
 Given a credential containing `L` bytes, a verifier MUST:
 
-1. Reject it if `L < 66`.
-2. Interpret the final 64 bytes as the signature.
+1. Reject it if `L < 50`.
+2. Interpret the final 48 bytes as the signature.
 3. Decode the header.
 4. Determine the flag-data length.
 5. Reject non-minimal or out-of-bounds flag encodings.
 6. Interpret the flag bytes as a bitset.
 7. Treat all remaining unsigned bytes as the UTF-8 name.
-8. Resolve the Key ID to a trusted public key.
-9. Verify the signature over the domain prefix and unsigned credential.
-10. Validate and display the name only after successful verification.
+8. Resolve the Key ID to a trusted public key and validate that it is a canonical, non-identity point in the correct subgroup of G2.
+9. Validate that the signature is a canonical, non-identity point in the correct subgroup of G1.
+10. Verify the signature over the domain prefix and unsigned credential using the specified ciphersuite.
+11. Validate and display the name only after successful verification.
 
 All arithmetic and bounds checks MUST be completed before slicing the input.
 
@@ -156,7 +165,7 @@ All arithmetic and bounds checks MUST be completed before slicing the input.
 The credential size is:
 
 ```text
-1 + E + F + N + 64 bytes
+1 + E + F + N + 48 bytes
 ```
 
 Where:
@@ -168,7 +177,7 @@ Where:
 A 20-byte name with two flag bytes produces:
 
 ```text
-1 + 0 + 2 + 20 + 64 = 87 bytes
+1 + 0 + 2 + 20 + 48 = 71 bytes
 ```
 
 ## 9. Example
@@ -196,9 +205,9 @@ The unsigned credential is:
 └─────────────────── version 1, key 2, one flag byte
 ```
 
-The 64-byte Ed25519 signature follows these bytes.
+The 48-byte compressed BLS signature follows these bytes.
 
-The complete credential is 71 bytes.
+The complete credential is 55 bytes.
 
 ## 10. QR transport
 
