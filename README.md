@@ -2,7 +2,7 @@
 
 `digital-membership` is a small Axum service that creates signed Digital Membership
 credentials and returns them directly encoded in PNG QR codes. It generates a fresh
-Ed25519 key pair each time it starts; restarting the process therefore invalidates
+BLS12-381 key pair each time it starts; restarting the process therefore invalidates
 credentials unless verifiers also update the trusted public key.
 
 ## Run
@@ -47,14 +47,15 @@ Names must contain 1–255 UTF-8 bytes and may not contain control characters.
 
 ```json
 {
-  "algorithm": "Ed25519",
+  "algorithm": "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_",
   "key_id": 0,
   "public_key": "<base64url without padding>"
 }
 ```
 
-`public_key` is the raw 32-byte Ed25519 public key encoded with unpadded URL-safe Base64.
-Generated credentials use key ID `0`.
+`public_key` is the 96-byte compressed BLS12-381 G2 public key encoded with unpadded
+URL-safe Base64. Credentials contain 48-byte compressed G1 signatures and use key ID
+`0`.
 
 ### Health check
 

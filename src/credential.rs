@@ -1,7 +1,8 @@
-use ed25519_dalek::{Signer, SigningKey};
+use blst::min_sig::SecretKey;
 
 use crate::error::AppError;
 
+pub const BLS_CIPHERSUITE: &str = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
 const DOMAIN_PREFIX: &[u8] = b"digital-membership/v1\0";
 const VERSION: u8 = 1;
 const MAX_NAME_BYTES: usize = 255;
@@ -12,7 +13,7 @@ pub fn encode_credential(
     name: &str,
     flags: &[u32],
     key_id: u8,
-    signing_key: &SigningKey,
+    signing_key: &SecretKey,
 ) -> Result<Vec<u8>, AppError> {
     validate_name(name)?;
     if key_id > 7 {
@@ -42,7 +43,7 @@ pub fn encode_credential(
     let mut message = Vec::with_capacity(DOMAIN_PREFIX.len() + unsigned.len());
     message.extend_from_slice(DOMAIN_PREFIX);
     message.extend_from_slice(&unsigned);
-    let signature = signing_key.sign(&message);
+    let signature = signing_key.sign(&message, BLS_CIPHERSUITE.as_bytes(), &[]);
 
     let mut credential = Vec::with_capacity(unsigned.len() + signature.to_bytes().len());
     credential.extend_from_slice(&unsigned);
@@ -88,11 +89,12 @@ fn encode_flags(flags: &[u32]) -> Result<Vec<u8>, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DOMAIN_PREFIX, encode_credential};
-    use ed25519_dalek::{Signature, SigningKey, Verifier};
+    use super::{BLS_CIPHERSUITE, DOMAIN_PREFIX, encode_credential};
+    use blst::BLST_ERROR;
+    use blst::min_sig::{SecretKey, Signature};
 
-    fn signing_key() -> SigningKey {
-        SigningKey::from_bytes(&[42_u8; 32])
+    fn signing_key() -> SecretKey {
+        SecretKey::key_gen_v5(&[42_u8; 32], &[], &[]).unwrap()
     }
 
     #[test]
@@ -101,7 +103,7 @@ mod tests {
         let credential = encode_credential("Alice", &[0, 5], 2, &key).unwrap();
 
         assert_eq!(&credential[..7], b"\x29\x21Alice");
-        assert_eq!(credential.len(), 71);
+        assert_eq!(credential.len(), 55);
     }
 
     #[test]
@@ -124,12 +126,22 @@ mod tests {
     fn signs_domain_prefix_and_unsigned_credential() {
         let key = signing_key();
         let credential = encode_credential("Alice", &[0, 5], 2, &key).unwrap();
-        let signature_offset = credential.len() - 64;
+        let signature_offset = credential.len() - 48;
         let mut message = DOMAIN_PREFIX.to_vec();
         message.extend_from_slice(&credential[..signature_offset]);
-        let signature = Signature::from_slice(&credential[signature_offset..]).unwrap();
+        let signature = Signature::from_bytes(&credential[signature_offset..]).unwrap();
 
-        key.verifying_key().verify(&message, &signature).unwrap();
+        assert_eq!(
+            signature.verify(
+                true,
+                &message,
+                BLS_CIPHERSUITE.as_bytes(),
+                &[],
+                &key.sk_to_pk(),
+                true,
+            ),
+            BLST_ERROR::BLST_SUCCESS
+        );
     }
 
     #[test]
