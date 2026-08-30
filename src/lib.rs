@@ -1,38 +1,38 @@
 mod credential;
 mod error;
+mod issuer;
 mod signing;
 mod wallet;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{RawQuery, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderValue, Response, StatusCode, header};
 use axum::routing::get;
 use axum::{Json, Router};
-use namecompress::Table;
 use qrcode_generator::Renderer;
 use qrcode_generator::qr::{Encoder, ErrorCorrection};
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
-use std::path::Path;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
-use xz2::read::XzDecoder;
-use xz2::write::XzEncoder;
 
 use crate::credential::{BLS_CIPHERSUITE, Identifier, encode_credential, issue_day_now};
 use crate::error::AppError;
+use crate::issuer::{FlagRef, Issuer};
 use crate::wallet::WalletPass;
 
+pub use crate::issuer::IssuerConfig;
 pub use crate::signing::SigningKey;
 pub use crate::wallet::WalletConfig;
 
+/// Every issuer signs under key ID 0. The binary format still carries the field,
+/// but an issuer is selected by the path a scanner was provisioned from rather
+/// than by anything in the credential, so nothing reads it back.
 const KEY_ID: u8 = 0;
 const QR_IMAGE_SIZE: usize = 768;
-const NAME_MODEL_URL: &str = "/api/model/model.ncmp.xz";
-const XZ_MAGIC: &[u8] = b"\xfd7zXZ\0";
 
 #[cfg(test)]
-fn test_name_model() -> Table {
+fn test_name_model() -> namecompress::Table {
     use namecompress::TableBuilder;
     use namecompress::chars::{Alphabet, CharModelBuilder};
 
@@ -55,84 +55,38 @@ fn test_name_model() -> Table {
 
 #[derive(Clone)]
 pub struct AppState {
-    signing_key: Arc<SigningKey>,
-    name_model: Arc<Table>,
-    compressed_name_model: Arc<[u8]>,
+    issuers: Arc<BTreeMap<String, Issuer>>,
     wallet: Option<Arc<WalletPass>>,
 }
 
 impl AppState {
-    pub fn generate(name_model_path: &Path) -> anyhow::Result<Self> {
-        Self::generate_with_wallet(name_model_path, None)
-    }
-
-    pub fn generate_with_wallet(
-        name_model_path: &Path,
-        wallet_config: Option<WalletConfig>,
-    ) -> anyhow::Result<Self> {
-        let configured_name_model = std::fs::read(name_model_path).map_err(|error| {
-            anyhow::anyhow!(
-                "failed to read name model '{}': {error}",
-                name_model_path.display()
-            )
-        })?;
-        let (name_model_bytes, compressed_name_model) =
-            if configured_name_model.starts_with(XZ_MAGIC) {
-                let mut decompressed = Vec::new();
-                XzDecoder::new(configured_name_model.as_slice())
-                    .read_to_end(&mut decompressed)
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "failed to decompress xz name model '{}': {error}",
-                            name_model_path.display()
-                        )
-                    })?;
-                (decompressed, configured_name_model)
-            } else {
-                let mut encoder = XzEncoder::new(Vec::new(), 6);
-                encoder.write_all(&configured_name_model).map_err(|error| {
-                    anyhow::anyhow!(
-                        "failed to compress name model '{}': {error}",
-                        name_model_path.display()
-                    )
-                })?;
-                let compressed = encoder.finish().map_err(|error| {
-                    anyhow::anyhow!(
-                        "failed to finish compressing name model '{}': {error}",
-                        name_model_path.display()
-                    )
-                })?;
-                (configured_name_model, compressed)
-            };
-        let name_model = Table::load(&name_model_bytes).map_err(|error| {
-            anyhow::anyhow!(
-                "failed to load name model '{}': {error}",
-                name_model_path.display()
-            )
-        })?;
-
-        let signing_key = SigningKey::generate()?;
-        let wallet = wallet_config
-            .map(WalletPass::load)
-            .transpose()?
-            .map(Arc::new);
+    pub fn load(issuers: Vec<IssuerConfig>, wallet: Option<WalletConfig>) -> anyhow::Result<Self> {
+        let issuers = issuers
+            .into_iter()
+            .map(|config| Ok((config.id.clone(), Issuer::load(config)?)))
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        let wallet = wallet.map(WalletPass::load).transpose()?.map(Arc::new);
         Ok(Self {
-            signing_key: Arc::new(signing_key),
-            name_model: Arc::new(name_model),
-            compressed_name_model: compressed_name_model.into(),
+            issuers: Arc::new(issuers),
             wallet,
         })
     }
 
+    /// The configured issuer ids, in the order they are served.
+    pub fn issuer_ids(&self) -> impl Iterator<Item = &str> {
+        self.issuers.keys().map(String::as_str)
+    }
+
+    fn issuer(&self, id: &str) -> Result<&Issuer, AppError> {
+        self.issuers
+            .get(id)
+            .ok_or_else(|| AppError::NotFound(format!("no issuer '{id}' is configured")))
+    }
+
     #[cfg(test)]
-    fn from_signing_key(signing_key: SigningKey, name_model: Table) -> Self {
-        let mut encoder = XzEncoder::new(Vec::new(), 6);
-        encoder.write_all(&name_model.write()).unwrap();
-        let compressed_name_model = encoder.finish().unwrap();
+    fn from_issuer(issuer: Issuer) -> Self {
         Self {
-            signing_key: Arc::new(signing_key),
-            name_model: Arc::new(name_model),
-            compressed_name_model: compressed_name_model.into(),
+            issuers: Arc::new(BTreeMap::from([(issuer.id.clone(), issuer)])),
             wallet: None,
         }
     }
@@ -141,10 +95,10 @@ impl AppState {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/api/healthz", get(healthz))
-        .route("/api/qr", get(qr_code_get).post(qr_code_post))
-        .route("/api/wallet", get(wallet_pass_get))
-        .route("/api/provision", get(provision))
-        .route(NAME_MODEL_URL, get(name_model))
+        .route("/api/{issuer}/qr", get(qr_code_get).post(qr_code_post))
+        .route("/api/{issuer}/wallet", get(wallet_pass_get))
+        .route("/api/{issuer}/provision", get(provision))
+        .route("/api/{issuer}/model/model.ncmp.xz", get(name_model))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -158,7 +112,7 @@ async fn healthz() -> StatusCode {
 struct QrRequest {
     name: String,
     #[serde(default)]
-    flags: Vec<u32>,
+    flags: Vec<FlagRef>,
     /// A textual member identifier. Mutually exclusive with `member_number`.
     #[serde(default)]
     member_id: Option<String>,
@@ -183,17 +137,19 @@ impl QrRequest {
 
 async fn qr_code_post(
     State(state): State<AppState>,
+    Path(issuer): Path<String>,
     Json(request): Json<QrRequest>,
 ) -> Result<Response<Body>, AppError> {
-    generate_qr_code(&state, request)
+    generate_qr_code(state.issuer(&issuer)?, &request)
 }
 
 async fn qr_code_get(
     State(state): State<AppState>,
+    Path(issuer): Path<String>,
     RawQuery(query): RawQuery,
 ) -> Result<Response<Body>, AppError> {
     let request = parse_qr_query(query.as_deref())?;
-    generate_qr_code(&state, request)
+    generate_qr_code(state.issuer(&issuer)?, &request)
 }
 
 fn parse_qr_query(query: Option<&str>) -> Result<QrRequest, AppError> {
@@ -230,15 +186,7 @@ fn parse_qr_query(query: Option<&str>) -> Result<QrRequest, AppError> {
             }
             "flags" if value.is_empty() => {}
             "flags" => {
-                for value in value.split(',') {
-                    let flag = value.parse::<u32>().map_err(|_| {
-                        AppError::BadRequest(
-                            "flags must be non-negative integers; use repeated parameters or a comma-separated list"
-                                .to_string(),
-                        )
-                    })?;
-                    flags.push(flag);
-                }
+                flags.extend(value.split(',').map(FlagRef::parse));
             }
             parameter => {
                 return Err(AppError::BadRequest(format!(
@@ -258,8 +206,8 @@ fn parse_qr_query(query: Option<&str>) -> Result<QrRequest, AppError> {
     })
 }
 
-fn generate_qr_code(state: &AppState, request: QrRequest) -> Result<Response<Body>, AppError> {
-    let credential = generate_credential(state, &request)?;
+fn generate_qr_code(issuer: &Issuer, request: &QrRequest) -> Result<Response<Body>, AppError> {
+    let credential = generate_credential(issuer, request)?;
     let symbol = Encoder::new(ErrorCorrection::Medium)
         .encode_bytes(&credential)
         .map_err(|error| AppError::Internal(format!("failed to encode QR code: {error}")))?;
@@ -275,13 +223,15 @@ fn generate_qr_code(state: &AppState, request: QrRequest) -> Result<Response<Bod
 
 async fn wallet_pass_get(
     State(state): State<AppState>,
+    Path(issuer): Path<String>,
     RawQuery(query): RawQuery,
 ) -> Result<Response<Body>, AppError> {
     let request = parse_qr_query(query.as_deref())?;
+    let issuer = state.issuer(&issuer)?;
     let wallet = state.wallet.as_ref().ok_or_else(|| {
         AppError::Unavailable("Apple Wallet support is not configured".to_string())
     })?;
-    let credential = generate_credential(&state, &request)?;
+    let credential = generate_credential(issuer, &request)?;
     let pass = wallet
         .build(&request.name, &credential)
         .map_err(|error| AppError::Internal(format!("failed to build Wallet pass: {error:#}")))?;
@@ -297,70 +247,106 @@ async fn wallet_pass_get(
         .map_err(|error| AppError::Internal(format!("failed to build response: {error}")))
 }
 
-fn generate_credential(state: &AppState, request: &QrRequest) -> Result<Vec<u8>, AppError> {
+fn generate_credential(issuer: &Issuer, request: &QrRequest) -> Result<Vec<u8>, AppError> {
     encode_credential(
         &request.name,
-        &request.flags,
+        &issuer.resolve_flags(&request.flags)?,
         &request.identifier()?,
         issue_day_now()?,
         KEY_ID,
-        state.name_model.as_ref(),
-        state.signing_key.secret(),
+        &issuer.name_model,
+        issuer.signing_key.secret(),
     )
 }
 
 #[derive(Debug, Serialize)]
 struct ProvisionResponse {
     algorithm: &'static str,
+    id: String,
+    description: String,
     key_id: u8,
     name_model_id: u32,
-    name_model_url: &'static str,
+    name_model_url: String,
     public_key: String,
+    /// Flag labels, where the position in the list is the flag number and an
+    /// empty label means that number has no name.
+    flags: Vec<String>,
 }
 
-async fn provision(State(state): State<AppState>) -> Json<ProvisionResponse> {
-    Json(ProvisionResponse {
+async fn provision(
+    State(state): State<AppState>,
+    Path(issuer): Path<String>,
+) -> Result<Json<ProvisionResponse>, AppError> {
+    let issuer = state.issuer(&issuer)?;
+    Ok(Json(ProvisionResponse {
         algorithm: BLS_CIPHERSUITE,
+        id: issuer.id.clone(),
+        description: issuer.description.clone(),
         key_id: KEY_ID,
-        name_model_id: state.name_model.id,
-        name_model_url: NAME_MODEL_URL,
-        public_key: state.signing_key.public_key_base64(),
-    })
+        name_model_id: issuer.name_model.id,
+        name_model_url: issuer.name_model_url(),
+        public_key: issuer.signing_key.public_key_base64(),
+        flags: issuer.flags.clone(),
+    }))
 }
 
-async fn name_model(State(state): State<AppState>) -> Response<Body> {
-    Response::builder()
+async fn name_model(
+    State(state): State<AppState>,
+    Path(issuer): Path<String>,
+) -> Result<Response<Body>, AppError> {
+    let model = Arc::clone(&state.issuer(&issuer)?.compressed_name_model);
+    Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/x-xz")
-        .body(Body::from(Bytes::from_owner(state.compressed_name_model)))
-        .expect("static name model response is valid")
+        .body(Body::from(Bytes::from_owner(model)))
+        .expect("static name model response is valid"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, Identifier, XZ_MAGIC, app, parse_qr_query, test_name_model};
+    use super::{AppState, app, parse_qr_query, test_name_model};
+    use crate::issuer::{FlagRef, Issuer};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use blst::min_sig::SecretKey;
-    use std::io::Read;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
     use tower::ServiceExt;
     use xz2::read::XzDecoder;
+    use xz2::write::XzEncoder;
+
+    const XZ_MAGIC: &[u8] = b"\xfd7zXZ\0";
+
+    fn test_issuer() -> Issuer {
+        let model = test_name_model();
+        let mut encoder = XzEncoder::new(Vec::new(), 6);
+        encoder.write_all(&model.write()).unwrap();
+        Issuer {
+            id: "example".to_string(),
+            description: "Example Membership Society".to_string(),
+            signing_key: SecretKey::key_gen_v5(&[7_u8; 32], &[], &[]).unwrap().into(),
+            name_model: model,
+            compressed_name_model: encoder.finish().unwrap().into(),
+            flags: vec![
+                "member".to_string(),
+                String::new(),
+                "vegetarian".to_string(),
+            ],
+        }
+    }
 
     fn test_app() -> axum::Router {
-        app(AppState::from_signing_key(
-            SecretKey::key_gen_v5(&[7_u8; 32], &[], &[]).unwrap().into(),
-            test_name_model(),
-        ))
+        app(AppState::from_issuer(test_issuer()))
     }
 
     #[tokio::test]
     async fn post_returns_png() {
         let response = test_app()
             .oneshot(
-                Request::post("/api/qr")
+                Request::post("/api/example/qr")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"name":"Alice","flags":[0,5,9]}"#))
+                    .body(Body::from(r#"{"name":"Alice","flags":[0,"vegetarian",9]}"#))
                     .unwrap(),
             )
             .await
@@ -376,7 +362,7 @@ mod tests {
     async fn get_returns_png_for_url_encoded_query() {
         let response = test_app()
             .oneshot(
-                Request::get("/api/qr?name=Alice+Smith&flags=0%2C5&flags=9")
+                Request::get("/api/example/qr?name=Alice+Smith&flags=member%2C5&flags=9")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -389,16 +375,55 @@ mod tests {
         assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 
+    #[tokio::test]
+    async fn an_unknown_issuer_is_not_found() {
+        for path in [
+            "/api/choir/qr?name=Alice",
+            "/api/choir/provision",
+            "/api/choir/model/model.ncmp.xz",
+        ] {
+            let response = test_app()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_a_flag_label_the_issuer_does_not_define() {
+        let response = test_app()
+            .oneshot(
+                Request::get("/api/example/qr?name=Alice&flags=committee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
     #[test]
     fn parses_repeated_and_comma_separated_flags() {
-        let request = parse_qr_query(Some("name=Alice+Smith&flags=0%2C5&flags=9")).unwrap();
+        let request = parse_qr_query(Some("name=Alice+Smith&flags=member%2C5&flags=9")).unwrap();
 
         assert_eq!(request.name, "Alice Smith");
-        assert_eq!(request.flags, [0, 5, 9]);
+        assert_eq!(
+            request.flags,
+            [
+                FlagRef::Label("member".to_string()),
+                FlagRef::Number(5),
+                FlagRef::Number(9)
+            ]
+        );
     }
 
     #[test]
     fn parses_either_form_of_member_identifier() {
+        use crate::credential::Identifier;
+
         let request = parse_qr_query(Some("name=Alice&member_number=4242")).unwrap();
         assert_eq!(request.identifier().unwrap(), Identifier::Number(4242));
 
@@ -424,7 +449,11 @@ mod tests {
     #[tokio::test]
     async fn get_rejects_missing_name() {
         let response = test_app()
-            .oneshot(Request::get("/api/qr?flags=0").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/example/qr?flags=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -435,7 +464,7 @@ mod tests {
     async fn wallet_endpoint_reports_missing_configuration() {
         let response = test_app()
             .oneshot(
-                Request::get("/api/wallet?name=Alice")
+                Request::get("/api/example/wallet?name=Alice")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -448,7 +477,11 @@ mod tests {
     #[tokio::test]
     async fn exposes_provisioning_metadata() {
         let response = test_app()
-            .oneshot(Request::get("/api/provision").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/api/example/provision")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
@@ -456,9 +489,12 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains(r#""algorithm":"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_""#));
+        assert!(body.contains(r#""id":"example""#));
+        assert!(body.contains(r#""description":"Example Membership Society""#));
         assert!(body.contains(r#""key_id":0"#));
         assert!(body.contains(r#""name_model_id":"#));
-        assert!(body.contains(r#""name_model_url":"/api/model/model.ncmp.xz""#));
+        assert!(body.contains(r#""name_model_url":"/api/example/model/model.ncmp.xz""#));
+        assert!(body.contains(r#""flags":["member","","vegetarian"]"#));
         let public_key = body
             .split_once(r#""public_key":""#)
             .unwrap()
@@ -474,7 +510,7 @@ mod tests {
         let expected_model = test_name_model();
         let response = test_app()
             .oneshot(
-                Request::get("/api/model/model.ncmp.xz")
+                Request::get("/api/example/model/model.ncmp.xz")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -493,51 +529,47 @@ mod tests {
         assert_eq!(downloaded_model.id, expected_model.id);
     }
 
-    #[test]
-    fn loads_configured_name_model() {
-        let model = test_name_model();
-        let path = std::env::temp_dir().join(format!(
-            "digital-membership-name-model-{}.ncmp",
-            std::process::id()
-        ));
-        let model_bytes = model.write();
-        assert_eq!(&model_bytes[..6], b"NCMP\x01\0");
-        std::fs::write(&path, model_bytes).unwrap();
+    #[tokio::test]
+    async fn each_issuer_signs_with_its_own_key() {
+        let mut choir = test_issuer();
+        choir.id = "choir".to_string();
+        choir.description = "Example Choral Society".to_string();
+        choir.signing_key = SecretKey::key_gen_v5(&[9_u8; 32], &[], &[]).unwrap().into();
+        let expected = choir.signing_key.public_key_base64();
+        let state = AppState {
+            issuers: Arc::new(
+                [test_issuer(), choir]
+                    .into_iter()
+                    .map(|issuer| (issuer.id.clone(), issuer))
+                    .collect(),
+            ),
+            wallet: None,
+        };
+        assert_eq!(state.issuer_ids().collect::<Vec<_>>(), ["choir", "example"]);
 
-        let state = AppState::generate(&path).unwrap();
-        std::fs::remove_file(path).unwrap();
+        let response = app(state)
+            .oneshot(
+                Request::get("/api/choir/provision")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-        assert_eq!(state.name_model.id, model.id);
-        assert!(state.compressed_name_model.starts_with(XZ_MAGIC));
-    }
-
-    #[test]
-    fn loads_xz_compressed_name_model() {
-        use std::io::Write;
-        use xz2::write::XzEncoder;
-
-        let model = test_name_model();
-        let path = std::env::temp_dir().join(format!(
-            "digital-membership-name-model-{}.ncmp.xz",
-            std::process::id()
-        ));
-        let mut encoder = XzEncoder::new(Vec::new(), 6);
-        encoder.write_all(&model.write()).unwrap();
-        let compressed = encoder.finish().unwrap();
-        std::fs::write(&path, &compressed).unwrap();
-
-        let state = AppState::generate(&path).unwrap();
-        std::fs::remove_file(path).unwrap();
-
-        assert_eq!(state.name_model.id, model.id);
-        assert_eq!(state.compressed_name_model.as_ref(), compressed);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains(&format!(r#""public_key":"{expected}""#)),
+            "{body}"
+        );
+        assert!(body.contains(r#""name_model_url":"/api/choir/model/model.ncmp.xz""#));
     }
 
     #[tokio::test]
     async fn rejects_invalid_credential_input() {
         let response = test_app()
             .oneshot(
-                Request::post("/api/qr")
+                Request::post("/api/example/qr")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(r#"{"name":"","flags":[]}"#))
                     .unwrap(),
