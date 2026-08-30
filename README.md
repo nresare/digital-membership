@@ -210,6 +210,31 @@ deployment, avoid putting personal details directly in a URL: use an authenticat
 opaque enrollment URL that resolves to the name, flags, and member identifier on the
 server.
 
+### Bootstrap a scanner
+
+`GET /setup` lists the issuers this instance signs for:
+
+```json
+{
+  "issuers": [
+    {
+      "id": "example",
+      "description": "Example Membership Society",
+      "provision_url": "/api/example/provision"
+    },
+    {
+      "id": "choir",
+      "description": "Example Choral Society",
+      "provision_url": "/api/choir/provision"
+    }
+  ]
+}
+```
+
+This is the one endpoint a scanner can reach knowing nothing but the service origin, which is why it sits outside `/api` rather than under an issuer path. Point a scanner at `https://example.com/setup`, show the `description` of each entry, and fetch the `provision_url` of whichever the user picks to get that issuer's key, model and flag labels. `provision_url` is relative to the service origin.
+
+Issuers are listed in order of `id`, not in the order they appear in the config file, so the list is stable across edits.
+
 ### Read scanner configuration
 
 `GET /api/{issuer}/provision` returns everything a scanner needs to verify and display

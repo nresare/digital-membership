@@ -161,6 +161,12 @@ impl Issuer {
         format!("/api/{}/model/model.ncmp.xz", self.id)
     }
 
+    /// The path the issuer's provisioning metadata is served from, as published
+    /// by `/setup`.
+    pub(crate) fn provision_url(&self) -> String {
+        format!("/api/{}/provision", self.id)
+    }
+
     /// Turns the flags named by a request into flag numbers.
     pub(crate) fn resolve_flags(&self, flags: &[FlagRef]) -> Result<Vec<u32>, AppError> {
         flags
@@ -300,11 +306,12 @@ mod tests {
     }
 
     #[test]
-    fn name_model_url_is_under_the_issuer_path() {
+    fn urls_are_under_the_issuer_path() {
         assert_eq!(
             issuer(&[]).name_model_url(),
             "/api/example/model/model.ncmp.xz"
         );
+        assert_eq!(issuer(&[]).provision_url(), "/api/example/provision");
     }
 
     #[test]
