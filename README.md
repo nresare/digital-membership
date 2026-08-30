@@ -78,13 +78,13 @@ organization_name = "Example Membership"
 ```
 
 Omit the whole `[wallet]` section to disable Wallet support; within it, every key other
-than `organization_name` and `pkcs12_password` is required. `organization_name` defaults
-to `Digital Membership`. The certificate may be PEM or DER.
+than `organization_name` is required. `organization_name` defaults to `Digital
+Membership`. The certificate may be PEM or DER.
 
-`pkcs12_password` may be set in the config file, but leaving it out lets the service
-read the password from the `DIGITAL_MEMBERSHIP_WALLET_P12_PASSWORD` environment
-variable instead, so that a Kubernetes deployment can keep the config in a ConfigMap and
-the password in a Secret. It defaults to an empty string when neither is set.
+Export the PKCS#12 identity without a password. The file holds the Pass Type private
+key, so it is the secret in its own right and must be mounted from a Kubernetes Secret
+rather than a ConfigMap; wrapping it in a second secret that has to be deployed
+alongside it protects nothing.
 
 Once configured, `GET /api/wallet` accepts the same query parameters as `GET /api/qr`:
 
