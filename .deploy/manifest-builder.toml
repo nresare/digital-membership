@@ -1,4 +1,4 @@
-[[simple]]
+[[website]]
 name = "dm.noa.re"
 namespace = "digital-membership"
 config = {"/config/digital-membership.toml" = "digital-membership.toml"}
