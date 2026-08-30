@@ -9,7 +9,9 @@ const DOMAIN_PREFIX: &[u8] = b"digital-membership/v1\0";
 const VERSION: u8 = 1;
 const MAX_NAME_BYTES: usize = 255;
 const MAX_FLAG_BYTES: usize = 255;
-const MAX_FLAG: u32 = (MAX_FLAG_BYTES as u32 * 8) - 1;
+/// Flags 0, 1 and 2 live in the header; everything above them is flag data.
+const HEADER_FLAGS: u32 = 3;
+const MAX_FLAG: u32 = HEADER_FLAGS + (MAX_FLAG_BYTES as u32 * 8) - 1;
 
 /// Unix day number of the format epoch, `2026-01-01T00:00:00Z`. Unix time
 /// excludes leap seconds, so dividing a timestamp by the length of a day is an
@@ -40,23 +42,17 @@ pub fn encode_credential(
     flags: &[u32],
     identifier: &Identifier,
     issue_day: u16,
-    key_id: u8,
     name_model: &Table,
     signing_key: &SecretKey,
 ) -> Result<Vec<u8>, AppError> {
     validate_name(name)?;
-    if key_id > 7 {
-        return Err(AppError::Internal(format!(
-            "key ID {key_id} is outside the supported range 0..=7"
-        )));
-    }
     if issue_day > MAX_ISSUE_DAY {
         return Err(AppError::Internal(format!(
             "issue day {issue_day} is outside the representable range 0..={MAX_ISSUE_DAY}"
         )));
     }
 
-    let flag_bytes = encode_flags(flags)?;
+    let (header_flags, flag_bytes) = encode_flags(flags)?;
     let (id_code, identifier_bytes) = encode_identifier(identifier)?;
     let compressed_name = namecompress::compress(name_model, name)
         .map_err(|error| AppError::BadRequest(format!("name cannot be compressed: {error}")))?;
@@ -66,7 +62,7 @@ pub fn encode_credential(
         2 => 2,
         _ => 3,
     };
-    let header = (VERSION << 5) | (key_id << 2) | length_code;
+    let header = (VERSION << 5) | (length_code << 3) | header_flags;
     let issuance_word = (issue_day << 3) | u16::from(id_code);
 
     let extended_length = usize::from(flag_bytes.len() >= 3);
@@ -174,9 +170,11 @@ fn encode_identifier(identifier: &Identifier) -> Result<(u8, Vec<u8>), AppError>
     }
 }
 
-fn encode_flags(flags: &[u32]) -> Result<Vec<u8>, AppError> {
+/// Splits the flag bitset into the three bits carried by the header and the flag
+/// data that continues it.
+fn encode_flags(flags: &[u32]) -> Result<(u8, Vec<u8>), AppError> {
     let Some(highest) = flags.iter().copied().max() else {
-        return Ok(Vec::new());
+        return Ok((0, Vec::new()));
     };
     if highest > MAX_FLAG {
         return Err(AppError::BadRequest(format!(
@@ -184,13 +182,19 @@ fn encode_flags(flags: &[u32]) -> Result<Vec<u8>, AppError> {
         )));
     }
 
-    let mut bytes = vec![0_u8; highest as usize / 8 + 1];
+    // No flag data at all until some flag does not fit in the header.
+    let length = highest
+        .checked_sub(HEADER_FLAGS)
+        .map_or(0, |flag| flag as usize / 8 + 1);
+    let mut header_flags = 0_u8;
+    let mut bytes = vec![0_u8; length];
     for &flag in flags {
-        let byte_index = flag as usize / 8;
-        let bit_index = flag % 8;
-        bytes[byte_index] |= 1 << bit_index;
+        match flag.checked_sub(HEADER_FLAGS) {
+            None => header_flags |= 1 << flag,
+            Some(flag) => bytes[flag as usize / 8] |= 1 << (flag % 8),
+        }
     }
-    Ok(bytes)
+    Ok((header_flags, bytes))
 }
 
 #[cfg(test)]
@@ -222,13 +226,12 @@ mod tests {
             &[0, 5],
             &Identifier::Number(4242),
             241,
-            2,
             &model,
             &key,
         )
         .unwrap();
 
-        assert_eq!(&credential[..6], b"\x29\x07\x8a\x10\x92\x21");
+        assert_eq!(&credential[..6], b"\x29\x07\x8a\x10\x92\x04");
         assert_eq!(decoded_name(&model, &credential, 6), "John Smith");
         assert!(credential.len() < 62);
     }
@@ -238,10 +241,12 @@ mod tests {
         let key = signing_key();
         let model = test_name_model();
         let credential =
-            encode_credential("A", &[0, 5, 9], &Identifier::None, 0, 0, &model, &key).unwrap();
+            encode_credential("A", &[0, 5, 9], &Identifier::None, 0, &model, &key).unwrap();
 
-        assert_eq!(&credential[..5], b"\x22\x00\x00\x21\x02");
-        assert_eq!(decoded_name(&model, &credential, 5), "A");
+        // Flag 0 is the header's low bit; flags 5 and 9 are bits 2 and 6 of the
+        // single flag byte that continues the sequence.
+        assert_eq!(&credential[..4], b"\x29\x00\x00\x44");
+        assert_eq!(decoded_name(&model, &credential, 4), "A");
     }
 
     #[test]
@@ -249,7 +254,7 @@ mod tests {
         let key = signing_key();
         let model = test_name_model();
         let encode =
-            |identifier| encode_credential("A", &[], &identifier, 1, 0, &model, &key).unwrap();
+            |identifier| encode_credential("A", &[], &identifier, 1, &model, &key).unwrap();
 
         // Zero still occupies one byte: an empty encoding would mean no
         // identifier at all.
@@ -274,7 +279,6 @@ mod tests {
             &[],
             &Identifier::Text("AB-99".to_string()),
             1,
-            0,
             &model,
             &key,
         )
@@ -285,13 +289,29 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_first_three_flags_out_of_the_flag_data() {
+        let key = signing_key();
+        let model = test_name_model();
+        let encode = |flags: &[u32]| {
+            encode_credential("A", flags, &Identifier::None, 0, &model, &key).unwrap()[..4].to_vec()
+        };
+
+        // Flags 0 through 2 fit in the header, so no flag byte is emitted and
+        // the fourth byte is already the compressed name.
+        assert_eq!(encode(&[0, 1, 2])[..3], *b"\x27\x00\x00");
+        assert_eq!(encode(&[2])[..3], *b"\x24\x00\x00");
+        // Flag 3 is the first that needs one, and lands in its low bit.
+        assert_eq!(encode(&[3]), *b"\x28\x00\x00\x01");
+        assert_eq!(encode(&[2, 10])[..4], *b"\x2c\x00\x00\x80");
+    }
+
+    #[test]
     fn uses_extended_flag_length() {
         let key = signing_key();
         let model = test_name_model();
-        let credential =
-            encode_credential("A", &[16], &Identifier::None, 0, 0, &model, &key).unwrap();
+        let credential = encode_credential("A", &[19], &Identifier::None, 0, &model, &key).unwrap();
 
-        assert_eq!(&credential[..7], b"\x23\x03\x00\x00\x00\x00\x01");
+        assert_eq!(&credential[..7], b"\x38\x03\x00\x00\x00\x00\x01");
         assert_eq!(decoded_name(&model, &credential, 7), "A");
     }
 
@@ -300,7 +320,7 @@ mod tests {
         let key = signing_key();
         let model = test_name_model();
         let credential =
-            encode_credential("A", &[], &Identifier::None, MAX_ISSUE_DAY, 0, &model, &key).unwrap();
+            encode_credential("A", &[], &Identifier::None, MAX_ISSUE_DAY, &model, &key).unwrap();
 
         assert_eq!(&credential[..3], b"\x20\xff\xf8");
     }
@@ -333,7 +353,6 @@ mod tests {
             &[0, 5],
             &Identifier::Text("AB-99".to_string()),
             241,
-            2,
             &model,
             &key,
         )
@@ -361,13 +380,14 @@ mod tests {
         let key = signing_key();
         let model = test_name_model();
         let encode = |name: &str, flags: &[u32], identifier: Identifier| {
-            encode_credential(name, flags, &identifier, 0, 0, &model, &key)
+            encode_credential(name, flags, &identifier, 0, &model, &key)
         };
 
         assert!(encode("", &[], Identifier::None).is_err());
         assert!(encode("line\nbreak", &[], Identifier::None).is_err());
         assert!(encode(&"x".repeat(256), &[], Identifier::None).is_err());
-        assert!(encode("Alice", &[2040], Identifier::None).is_err());
+        assert!(encode("Alice", &[2042], Identifier::None).is_ok());
+        assert!(encode("Alice", &[2043], Identifier::None).is_err());
         assert!(encode("Alice", &[], Identifier::Number(1 << 48)).is_err());
         assert!(encode("Alice", &[], Identifier::Text(String::new())).is_err());
         assert!(encode("Alice", &[], Identifier::Text("a\nb".to_string())).is_err());

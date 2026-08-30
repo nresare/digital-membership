@@ -161,8 +161,8 @@ counted from `2026-01-01`, so it stops being representable after `2048-06-05`.
 The response is a 768 × 768 grayscale PNG. The signed credential is placed directly in
 QR byte mode using the binary layout in [`specification.md`](specification.md). Names
 are compressed with the configured `namecompress` model before signing. Duplicate flag
-numbers are harmless. The highest supported flag number is 2039, which corresponds to
-the specification's 255-byte flag-data limit.
+numbers are harmless. The highest supported flag number is 2042: three flags ride in the
+header, and the rest fit the specification's 255-byte flag-data limit.
 
 Names must contain 1–255 UTF-8 bytes and may not contain control characters.
 
@@ -220,7 +220,6 @@ that issuer's credentials:
   "algorithm": "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_",
   "id": "example",
   "description": "Example Membership Society",
-  "key_id": 0,
   "name_model_id": 1234567890,
   "name_model_url": "/api/example/model/model.ncmp.xz",
   "public_key": "<base64url without padding>",
@@ -240,9 +239,8 @@ can use it to confirm that the model associated with this key is the expected on
 XZ-compressed `application/x-xz` response, whose fingerprint after decompression will
 match `name_model_id`. An uncompressed startup model is compressed once at startup.
 
-Every issuer signs under key ID `0`. The binary format still carries the field, but a
-scanner is provisioned from one issuer's endpoint and holds that issuer's key, so nothing
-reads it back to choose between issuers.
+Nothing in a credential says which issuer signed it. A scanner is provisioned from one
+issuer's endpoint and verifies against the key it was given there.
 
 ### Health check
 

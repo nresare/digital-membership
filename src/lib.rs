@@ -25,10 +25,6 @@ pub use crate::issuer::IssuerConfig;
 pub use crate::signing::SigningKey;
 pub use crate::wallet::WalletConfig;
 
-/// Every issuer signs under key ID 0. The binary format still carries the field,
-/// but an issuer is selected by the path a scanner was provisioned from rather
-/// than by anything in the credential, so nothing reads it back.
-const KEY_ID: u8 = 0;
 const QR_IMAGE_SIZE: usize = 768;
 
 #[cfg(test)]
@@ -253,7 +249,6 @@ fn generate_credential(issuer: &Issuer, request: &QrRequest) -> Result<Vec<u8>, 
         &issuer.resolve_flags(&request.flags)?,
         &request.identifier()?,
         issue_day_now()?,
-        KEY_ID,
         &issuer.name_model,
         issuer.signing_key.secret(),
     )
@@ -264,7 +259,6 @@ struct ProvisionResponse {
     algorithm: &'static str,
     id: String,
     description: String,
-    key_id: u8,
     name_model_id: u32,
     name_model_url: String,
     public_key: String,
@@ -282,7 +276,6 @@ async fn provision(
         algorithm: BLS_CIPHERSUITE,
         id: issuer.id.clone(),
         description: issuer.description.clone(),
-        key_id: KEY_ID,
         name_model_id: issuer.name_model.id,
         name_model_url: issuer.name_model_url(),
         public_key: issuer.signing_key.public_key_base64(),
@@ -491,7 +484,6 @@ mod tests {
         assert!(body.contains(r#""algorithm":"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_""#));
         assert!(body.contains(r#""id":"example""#));
         assert!(body.contains(r#""description":"Example Membership Society""#));
-        assert!(body.contains(r#""key_id":0"#));
         assert!(body.contains(r#""name_model_id":"#));
         assert!(body.contains(r#""name_model_url":"/api/example/model/model.ncmp.xz""#));
         assert!(body.contains(r#""flags":["member","","vegetarian"]"#));

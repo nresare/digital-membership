@@ -11,9 +11,9 @@ use crate::signing::SigningKey;
 
 const XZ_MAGIC: &[u8] = b"\xfd7zXZ\0";
 
-/// The highest flag number the binary format can carry, from its 255-byte limit
-/// on flag data.
-const MAX_FLAG: usize = 2039;
+/// The highest flag number the binary format can carry: three bits in the header
+/// plus its 255-byte limit on flag data.
+const MAX_FLAG: usize = 2042;
 
 /// One issuer as written in the configuration file.
 #[derive(Debug, Clone, Deserialize)]
