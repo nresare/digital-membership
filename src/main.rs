@@ -99,7 +99,7 @@ fn generate_key(path: &Path) -> anyhow::Result<()> {
         ),
         _ => anyhow::anyhow!("failed to create signing key '{}': {error}", path.display()),
     })?;
-    file.write_all(format!("{}\n", key.secret_base64()).as_bytes())
+    file.write_all(key.to_key_file().as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(|error| {
             anyhow::anyhow!("failed to write signing key '{}': {error}", path.display())
@@ -112,9 +112,7 @@ fn generate_key(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, generate_key};
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use super::{Cli, SigningKey, generate_key};
     use clap::Parser;
     use std::path::PathBuf;
 
@@ -141,11 +139,8 @@ mod tests {
         generate_key(&path).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.is_ascii());
-        assert!(written.ends_with('\n'));
-        assert_eq!(
-            URL_SAFE_NO_PAD.decode(written.trim_end()).unwrap().len(),
-            32
-        );
+        let parsed = SigningKey::from_key_file(&written).unwrap();
+        assert_eq!(parsed.to_bytes().len(), 32);
 
         let error = generate_key(&path).unwrap_err().to_string();
         std::fs::remove_file(&path).unwrap();
