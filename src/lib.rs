@@ -91,7 +91,7 @@ impl AppState {
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/setup", get(setup))
-        .route("/api/healthz", get(healthz))
+        .route("/healthz", get(healthz))
         .route("/api/{issuer}/qr", get(qr_code_get).post(qr_code_post))
         .route("/api/{issuer}/wallet", get(wallet_pass_get))
         .route("/api/{issuer}/provision", get(provision))
@@ -363,6 +363,16 @@ mod tests {
 
     fn test_app() -> axum::Router {
         app(AppState::from_issuer(test_issuer()))
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_ok() {
+        let response = test_app()
+            .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

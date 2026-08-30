@@ -269,4 +269,4 @@ issuer's endpoint and verifies against the key it was given there.
 
 ### Health check
 
-`GET /api/healthz` returns HTTP 200 while the service is running.
+`GET /healthz` returns HTTP 200 while the service is running.
