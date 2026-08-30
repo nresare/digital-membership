@@ -68,17 +68,16 @@ repository is a commented example of every available setting.
 
 ## Generate a signing key
 
-`--key-gen` writes a new BLS12-381 signing key and prints its public key, then exits
-without starting the service:
+`--key-gen` writes a new BLS12-381 signing key and exits without starting the service.
+The path to write it to is required:
 
 ```bash
-digital-membership --key-gen
+digital-membership --key-gen example.secret
 ```
 
-The key is written to `signing-key.secret` in the current directory, or to a path given
-as `--key-gen <PATH>`, and the file is created with `0600` permissions. An existing file
-is never overwritten, since replacing a key silently invalidates every credential issued
-under it; remove it first if that is what you want.
+The file is created with `0600` permissions. An existing file is never overwritten, since
+replacing a key silently invalidates every credential issued under it; remove it first if
+that is what you want.
 
 The file is a self-describing ASCII TOML document naming the scheme the key belongs to:
 
@@ -105,15 +104,10 @@ copied between systems, and can be inspected without a hex dump.
 
 Point an issuer's `signing_key_path` at the file it writes.
 
-The public key is printed to stdout as the 96-byte compressed G2 point in unpadded
-URL-safe Base64 — the same encoding the provisioning endpoint reports — so it can be
-captured directly:
-
-```bash
-public_key=$(digital-membership --key-gen)
-```
-
-Diagnostics go to stderr, leaving stdout to carry only the key.
+Nothing is printed but a log line. The public key is the secret scalar times the
+BLS12-381 G2 generator, so it can be recomputed from this file at any time and never
+needs storing alongside it; the running service publishes it at
+`/api/{issuer}/provision`.
 
 ## API
 
