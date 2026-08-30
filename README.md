@@ -30,6 +30,30 @@ Unknown keys are rejected, so a misspelled setting fails at startup rather than 
 silently ignored. [`digital-membership.toml`](digital-membership.toml) in this
 repository is a commented example of every available setting.
 
+## Generate a signing key
+
+`--key-gen` writes a new BLS12-381 signing key and prints its public key, then exits
+without starting the service:
+
+```bash
+digital-membership --key-gen
+```
+
+The key is written to `signing-key.secret` in the current directory, or to a path given
+as `--key-gen <PATH>`. The file holds the 32-byte scalar and is created with `0600`
+permissions. An existing file is never overwritten, since replacing a key silently
+invalidates every credential issued under it; remove it first if that is what you want.
+
+The public key is printed to stdout as the 96-byte compressed G2 point in unpadded
+URL-safe Base64 — the same encoding `/api/provision` reports — so it can be captured
+directly:
+
+```bash
+public_key=$(digital-membership --key-gen)
+```
+
+Diagnostics go to stderr, leaving stdout to carry only the key.
+
 ## API
 
 ### Generate a QR code
