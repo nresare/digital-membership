@@ -23,6 +23,13 @@ impl SigningKey {
         self.0.to_bytes()
     }
 
+    /// The secret scalar in unpadded URL-safe Base64, the same alphabet used for
+    /// the public key. Keeping the key file ASCII makes it safe to paste into a
+    /// Secret manifest and to inspect without a hex dump.
+    pub fn secret_base64(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.to_bytes())
+    }
+
     /// The verification key as served by `/api/provision`: the 96-byte compressed
     /// G2 point in unpadded URL-safe Base64.
     pub fn public_key_base64(&self) -> String {
@@ -54,6 +61,19 @@ mod tests {
 
         assert_eq!(first.to_bytes().len(), SECRET_KEY_BYTES);
         assert_ne!(first.to_bytes(), second.to_bytes());
+    }
+
+    #[test]
+    fn secret_is_ascii_base64_of_the_scalar() {
+        let key = SigningKey::generate().unwrap();
+
+        let encoded = key.secret_base64();
+        assert!(encoded.is_ascii());
+        assert_eq!(
+            URL_SAFE_NO_PAD.decode(&encoded).unwrap(),
+            key.to_bytes().as_slice()
+        );
+        assert!(!encoded.contains('=') && !encoded.contains('+') && !encoded.contains('/'));
     }
 
     #[test]
