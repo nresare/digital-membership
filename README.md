@@ -7,17 +7,28 @@ credentials unless verifiers also update the trusted public key.
 
 ## Run
 
+All settings live in a TOML config file. The only command line option is the path to
+it, which defaults to `/config/digital-membership.toml` so that a container deployment
+can mount a ConfigMap and pass no arguments at all:
+
 ```bash
-cargo run -- \
-  --bind-address 127.0.0.1:8080 \
-  --name-model /path/to/names.ncmp
+cargo run -- --config-file digital-membership.toml
 ```
 
-`--name-model` is required and must identify a model table produced for the
-[`namecompress`](https://github.com/nresare/namecompress) crate. The model may be
-uncompressed or XZ-compressed; compression is detected from the file contents. The
-service loads and validates the model at startup. Verifiers need the same separately
-distributed model to decode names from credentials.
+```toml
+bind_address = "127.0.0.1:8080"
+name_model = "/path/to/names.ncmp"
+```
+
+`bind_address` defaults to `0.0.0.0:8080`. `name_model` is required and must identify a
+model table produced for the [`namecompress`](https://github.com/nresare/namecompress)
+crate. The model may be uncompressed or XZ-compressed; compression is detected from the
+file contents. The service loads and validates the model at startup. Verifiers need the
+same separately distributed model to decode names from credentials.
+
+Unknown keys are rejected, so a misspelled setting fails at startup rather than being
+silently ignored. [`digital-membership.toml`](digital-membership.toml) in this
+repository is a commented example of every available setting.
 
 ## API
 
@@ -57,21 +68,23 @@ Wallet support is optional. Configure it with a Pass Type signing identity expor
 PKCS#12, the Apple Worldwide Developer Relations intermediate certificate, and the
 identifiers from the Apple Developer portal:
 
-```bash
-export DIGITAL_MEMBERSHIP_WALLET_P12_PASSWORD='the export password'
-cargo run -- \
-  --bind-address 127.0.0.1:8080 \
-  --name-model /path/to/names.ncmp \
-  --wallet-pkcs12 /path/to/pass-identity.p12 \
-  --wallet-wwdr-certificate /path/to/AppleWWDR.cer \
-  --wallet-pass-type-identifier pass.example.digital-membership \
-  --wallet-team-identifier ABCDE12345 \
-  --wallet-organization-name 'Example Membership'
+```toml
+[wallet]
+pkcs12 = "/path/to/pass-identity.p12"
+wwdr_certificate = "/path/to/AppleWWDR.cer"
+pass_type_identifier = "pass.example.digital-membership"
+team_identifier = "ABCDE12345"
+organization_name = "Example Membership"
 ```
 
-The PKCS#12 password defaults to an empty string when
-`DIGITAL_MEMBERSHIP_WALLET_P12_PASSWORD` is unset. All four Wallet options other than
-the organization name must be supplied together. The certificate may be PEM or DER.
+Omit the whole `[wallet]` section to disable Wallet support; within it, every key other
+than `organization_name` and `pkcs12_password` is required. `organization_name` defaults
+to `Digital Membership`. The certificate may be PEM or DER.
+
+`pkcs12_password` may be set in the config file, but leaving it out lets the service
+read the password from the `DIGITAL_MEMBERSHIP_WALLET_P12_PASSWORD` environment
+variable instead, so that a Kubernetes deployment can keep the config in a ConfigMap and
+the password in a Secret. It defaults to an empty string when neither is set.
 
 Once configured, `GET /api/wallet` accepts the same query parameters as `GET /api/qr`:
 

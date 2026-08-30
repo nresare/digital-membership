@@ -1,0 +1,25 @@
+# Example configuration for digital-membership.
+#
+# The service reads /config/digital-membership.toml by default; pass
+# --config-file to point it somewhere else.
+
+bind_address = "0.0.0.0:8080"
+
+# Path to the namecompress model table used to compress names before signing.
+# Either an uncompressed .ncmp table or an XZ-compressed one.
+name_model = "/config/english.ncmp.xz"
+
+# Apple Wallet support is optional; omit the whole section to disable it, in
+# which case GET /api/wallet responds with HTTP 503.
+[wallet]
+# Pass Type signing identity exported as PKCS#12.
+pkcs12 = "/secrets/pass-identity.p12"
+# Export password for the PKCS#12 identity. Leave it out to take the password
+# from the DIGITAL_MEMBERSHIP_WALLET_P12_PASSWORD environment variable, which
+# keeps it out of a ConfigMap.
+# pkcs12_password = "the export password"
+# Apple Worldwide Developer Relations intermediate certificate, PEM or DER.
+wwdr_certificate = "/secrets/AppleWWDR.pem"
+pass_type_identifier = "pass.example.digital-membership"
+team_identifier = "ABCDE12345"
+organization_name = "Example Membership"

@@ -3,7 +3,7 @@ use openssl::pkcs12::Pkcs12;
 use openssl::pkey::{PKey, Private};
 use openssl::stack::Stack;
 use openssl::x509::X509;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha1::{Digest as _, Sha1};
 use sha2::Sha256;
 use std::collections::BTreeMap;
@@ -13,14 +13,23 @@ use zip::write::SimpleFileOptions;
 
 const ICON_SIZES: [(&str, u32); 3] = [("icon.png", 29), ("icon@2x.png", 58), ("icon@3x.png", 87)];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalletConfig {
+    #[serde(rename = "pkcs12")]
     pub pkcs12_path: PathBuf,
+    #[serde(default)]
     pub pkcs12_password: String,
+    #[serde(rename = "wwdr_certificate")]
     pub wwdr_certificate_path: PathBuf,
     pub pass_type_identifier: String,
     pub team_identifier: String,
+    #[serde(default = "default_organization_name")]
     pub organization_name: String,
+}
+
+fn default_organization_name() -> String {
+    "Digital Membership".to_string()
 }
 
 pub(crate) struct WalletPass {
