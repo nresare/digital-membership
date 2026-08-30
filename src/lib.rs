@@ -19,7 +19,7 @@ use tower_http::trace::TraceLayer;
 use xz2::read::XzDecoder;
 use xz2::write::XzEncoder;
 
-use crate::credential::{BLS_CIPHERSUITE, encode_credential};
+use crate::credential::{BLS_CIPHERSUITE, Identifier, encode_credential, issue_day_now};
 use crate::error::AppError;
 use crate::wallet::WalletPass;
 
@@ -154,10 +154,31 @@ async fn healthz() -> StatusCode {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct QrRequest {
     name: String,
     #[serde(default)]
     flags: Vec<u32>,
+    /// A textual member identifier. Mutually exclusive with `member_number`.
+    #[serde(default)]
+    member_id: Option<String>,
+    /// A numeric member identifier, which encodes more compactly than the same
+    /// digits as text. Mutually exclusive with `member_id`.
+    #[serde(default)]
+    member_number: Option<u64>,
+}
+
+impl QrRequest {
+    fn identifier(&self) -> Result<Identifier, AppError> {
+        match (&self.member_id, self.member_number) {
+            (Some(_), Some(_)) => Err(AppError::BadRequest(
+                "member_id and member_number must not both be provided".to_string(),
+            )),
+            (Some(text), None) => Ok(Identifier::Text(text.clone())),
+            (None, Some(number)) => Ok(Identifier::Number(number)),
+            (None, None) => Ok(Identifier::None),
+        }
+    }
 }
 
 async fn qr_code_post(
@@ -178,6 +199,8 @@ async fn qr_code_get(
 fn parse_qr_query(query: Option<&str>) -> Result<QrRequest, AppError> {
     let mut name = None;
     let mut flags = Vec::new();
+    let mut member_id = None;
+    let mut member_number = None;
 
     for (key, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
         match key.as_ref() {
@@ -185,6 +208,23 @@ fn parse_qr_query(query: Option<&str>) -> Result<QrRequest, AppError> {
                 if name.replace(value.into_owned()).is_some() {
                     return Err(AppError::BadRequest(
                         "name must be provided exactly once".to_string(),
+                    ));
+                }
+            }
+            "member_id" => {
+                if member_id.replace(value.into_owned()).is_some() {
+                    return Err(AppError::BadRequest(
+                        "member_id must be provided at most once".to_string(),
+                    ));
+                }
+            }
+            "member_number" => {
+                let number = value.parse::<u64>().map_err(|_| {
+                    AppError::BadRequest("member_number must be a non-negative integer".to_string())
+                })?;
+                if member_number.replace(number).is_some() {
+                    return Err(AppError::BadRequest(
+                        "member_number must be provided at most once".to_string(),
                     ));
                 }
             }
@@ -210,7 +250,12 @@ fn parse_qr_query(query: Option<&str>) -> Result<QrRequest, AppError> {
 
     let name =
         name.ok_or_else(|| AppError::BadRequest("name query parameter is required".to_string()))?;
-    Ok(QrRequest { name, flags })
+    Ok(QrRequest {
+        name,
+        flags,
+        member_id,
+        member_number,
+    })
 }
 
 fn generate_qr_code(state: &AppState, request: QrRequest) -> Result<Response<Body>, AppError> {
@@ -256,6 +301,8 @@ fn generate_credential(state: &AppState, request: &QrRequest) -> Result<Vec<u8>,
     encode_credential(
         &request.name,
         &request.flags,
+        &request.identifier()?,
+        issue_day_now()?,
         KEY_ID,
         state.name_model.as_ref(),
         state.signing_key.secret(),
@@ -290,7 +337,7 @@ async fn name_model(State(state): State<AppState>) -> Response<Body> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, XZ_MAGIC, app, parse_qr_query, test_name_model};
+    use super::{AppState, Identifier, XZ_MAGIC, app, parse_qr_query, test_name_model};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
     use base64::Engine;
@@ -348,6 +395,30 @@ mod tests {
 
         assert_eq!(request.name, "Alice Smith");
         assert_eq!(request.flags, [0, 5, 9]);
+    }
+
+    #[test]
+    fn parses_either_form_of_member_identifier() {
+        let request = parse_qr_query(Some("name=Alice&member_number=4242")).unwrap();
+        assert_eq!(request.identifier().unwrap(), Identifier::Number(4242));
+
+        let request = parse_qr_query(Some("name=Alice&member_id=AB-99")).unwrap();
+        assert_eq!(
+            request.identifier().unwrap(),
+            Identifier::Text("AB-99".to_string())
+        );
+
+        let request = parse_qr_query(Some("name=Alice")).unwrap();
+        assert_eq!(request.identifier().unwrap(), Identifier::None);
+    }
+
+    #[test]
+    fn rejects_conflicting_or_malformed_member_identifiers() {
+        let request = parse_qr_query(Some("name=Alice&member_id=AB-99&member_number=42")).unwrap();
+        assert!(request.identifier().is_err());
+
+        assert!(parse_qr_query(Some("name=Alice&member_number=AB-99")).is_err());
+        assert!(parse_qr_query(Some("name=Alice&member_id=a&member_id=b")).is_err());
     }
 
     #[tokio::test]
