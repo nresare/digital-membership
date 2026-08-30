@@ -1,5 +1,6 @@
 mod credential;
 mod error;
+mod signing;
 mod wallet;
 
 use axum::body::{Body, Bytes};
@@ -7,9 +8,6 @@ use axum::extract::{RawQuery, State};
 use axum::http::{HeaderValue, Response, StatusCode, header};
 use axum::routing::get;
 use axum::{Json, Router};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use blst::min_sig::SecretKey;
 use namecompress::Table;
 use qrcode_generator::Renderer;
 use qrcode_generator::qr::{Encoder, ErrorCorrection};
@@ -25,6 +23,7 @@ use crate::credential::{BLS_CIPHERSUITE, encode_credential};
 use crate::error::AppError;
 use crate::wallet::WalletPass;
 
+pub use crate::signing::SigningKey;
 pub use crate::wallet::WalletConfig;
 
 const KEY_ID: u8 = 0;
@@ -56,7 +55,7 @@ fn test_name_model() -> Table {
 
 #[derive(Clone)]
 pub struct AppState {
-    signing_key: Arc<SecretKey>,
+    signing_key: Arc<SigningKey>,
     name_model: Arc<Table>,
     compressed_name_model: Arc<[u8]>,
     wallet: Option<Arc<WalletPass>>,
@@ -112,11 +111,7 @@ impl AppState {
             )
         })?;
 
-        let mut ikm = [0_u8; 32];
-        getrandom::fill(&mut ikm)
-            .map_err(|error| anyhow::anyhow!("failed to generate signing key material: {error}"))?;
-        let signing_key = SecretKey::key_gen_v5(&ikm, &[], &[])
-            .map_err(|error| anyhow::anyhow!("failed to generate BLS signing key: {error:?}"))?;
+        let signing_key = SigningKey::generate()?;
         let wallet = wallet_config
             .map(WalletPass::load)
             .transpose()?
@@ -130,7 +125,7 @@ impl AppState {
     }
 
     #[cfg(test)]
-    fn from_signing_key(signing_key: SecretKey, name_model: Table) -> Self {
+    fn from_signing_key(signing_key: SigningKey, name_model: Table) -> Self {
         let mut encoder = XzEncoder::new(Vec::new(), 6);
         encoder.write_all(&name_model.write()).unwrap();
         let compressed_name_model = encoder.finish().unwrap();
@@ -263,7 +258,7 @@ fn generate_credential(state: &AppState, request: &QrRequest) -> Result<Vec<u8>,
         &request.flags,
         KEY_ID,
         state.name_model.as_ref(),
-        state.signing_key.as_ref(),
+        state.signing_key.secret(),
     )
 }
 
@@ -282,7 +277,7 @@ async fn provision(State(state): State<AppState>) -> Json<ProvisionResponse> {
         key_id: KEY_ID,
         name_model_id: state.name_model.id,
         name_model_url: NAME_MODEL_URL,
-        public_key: URL_SAFE_NO_PAD.encode(state.signing_key.sk_to_pk().to_bytes()),
+        public_key: state.signing_key.public_key_base64(),
     })
 }
 
@@ -307,7 +302,7 @@ mod tests {
 
     fn test_app() -> axum::Router {
         app(AppState::from_signing_key(
-            SecretKey::key_gen_v5(&[7_u8; 32], &[], &[]).unwrap(),
+            SecretKey::key_gen_v5(&[7_u8; 32], &[], &[]).unwrap().into(),
             test_name_model(),
         ))
     }
