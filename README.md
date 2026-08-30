@@ -81,13 +81,13 @@ Diagnostics go to stderr, leaving stdout to carry only the key.
 
 ### Generate a QR code
 
-`POST /api/qr` accepts JSON with a required `name` and an optional array of numeric
-`flags`:
+`POST /api/qr` accepts JSON with a required `name`, an optional array of numeric
+`flags`, and an optional member identifier:
 
 ```bash
 curl -sS http://127.0.0.1:8080/api/qr \
   -H 'content-type: application/json' \
-  -d '{"name":"Alice","flags":[0,5,9]}' \
+  -d '{"name":"Alice","flags":[0,5,9],"member_number":4242}' \
   --output membership.png
 ```
 
@@ -95,11 +95,25 @@ For easy use in a web browser, `GET /api/qr` accepts the same values as URL-enco
 query parameters. Flags may be repeated or supplied as a comma-separated list:
 
 ```text
-http://127.0.0.1:8080/api/qr?name=Alice%20Smith&flags=0,5,9
+http://127.0.0.1:8080/api/qr?name=Alice%20Smith&flags=0,5,9&member_number=4242
 http://127.0.0.1:8080/api/qr?name=Alice%20Smith&flags=0&flags=5&flags=9
 ```
 
 The `flags` parameter may be omitted entirely when no flags are asserted.
+
+The member identifier is an opaque handle the issuer assigns; the credential carries it
+so a scanner can recognise a member across re-issued codes, and so that a revocation
+list can name one. It comes in two forms, at most one of which may be given:
+
+- `member_number`, an integer below 2^48, stored in one to six bytes.
+- `member_id`, 1–255 UTF-8 bytes without control characters, stored with a length byte.
+
+Prefer `member_number` for identifiers that are already numeric: it is smaller. Omit
+both when no identifier is needed, which costs nothing in the credential.
+
+Each credential also records the UTC day it was signed, which a scanner can use to
+reject codes older than some age of its choosing. The day is written into 13 bits
+counted from `2026-01-01`, so it stops being representable after `2048-06-05`.
 
 The response is a 768 × 768 grayscale PNG. The signed credential is placed directly in
 QR byte mode using the binary layout in [`specification.md`](specification.md). Names
@@ -147,7 +161,8 @@ support push updates.
 
 If Wallet support is not configured, the endpoint returns HTTP 503. In a production
 deployment, avoid putting personal details directly in a URL: use an authenticated,
-opaque enrollment URL that resolves to the name and flags on the server.
+opaque enrollment URL that resolves to the name, flags, and member identifier on the
+server.
 
 ### Read scanner configuration
 
