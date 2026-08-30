@@ -4,8 +4,6 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-const WALLET_PASSWORD_ENV: &str = "DIGITAL_MEMBERSHIP_WALLET_P12_PASSWORD";
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -22,24 +20,10 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("could not read config file '{}'", path.display()))?;
-        let mut config: Self = toml::from_str(&content)
+        let config: Self = toml::from_str(&content)
             .with_context(|| format!("could not parse config file '{}'", path.display()))?;
-        config.apply_environment();
         config.validate()?;
         Ok(config)
-    }
-
-    /// Lets the PKCS#12 password be supplied out of band, so that deployments can keep
-    /// the config file in a ConfigMap and the password in a Secret.
-    fn apply_environment(&mut self) {
-        let Some(wallet) = self.wallet.as_mut() else {
-            return;
-        };
-        if wallet.pkcs12_password.is_empty()
-            && let Ok(password) = std::env::var(WALLET_PASSWORD_ENV)
-        {
-            wallet.pkcs12_password = password;
-        }
     }
 
     fn validate(&self) -> anyhow::Result<()> {
@@ -143,7 +127,6 @@ mod tests {
         assert_eq!(config.bind_address.to_string(), "127.0.0.1:9000");
         let wallet = config.wallet.unwrap();
         assert_eq!(wallet.team_identifier, "ABCDE12345");
-        assert!(wallet.pkcs12_password.is_empty());
         assert_eq!(wallet.organization_name, "Digital Membership");
     }
 }

@@ -11,6 +11,10 @@ use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
+/// The PKCS#12 identity is itself the secret, so it is stored unencrypted and
+/// parsed with the empty password OpenSSL uses for password-less bundles.
+const PKCS12_PASSWORD: &str = "";
+
 const ICON_SIZES: [(&str, u32); 3] = [("icon.png", 29), ("icon@2x.png", 58), ("icon@3x.png", 87)];
 
 #[derive(Debug, Clone, Deserialize)]
@@ -18,8 +22,6 @@ const ICON_SIZES: [(&str, u32); 3] = [("icon.png", 29), ("icon@2x.png", 58), ("i
 pub struct WalletConfig {
     #[serde(rename = "pkcs12")]
     pub pkcs12_path: PathBuf,
-    #[serde(default)]
-    pub pkcs12_password: String,
     #[serde(rename = "wwdr_certificate")]
     pub wwdr_certificate_path: PathBuf,
     pub pass_type_identifier: String,
@@ -50,7 +52,7 @@ impl WalletPass {
             )
         })?;
         let identity = Pkcs12::from_der(&identity_bytes)
-            .and_then(|pkcs12| pkcs12.parse2(&config.pkcs12_password))
+            .and_then(|pkcs12| pkcs12.parse2(PKCS12_PASSWORD))
             .map_err(|error| anyhow::anyhow!("failed to parse Wallet PKCS#12 identity: {error}"))?;
         let certificate = identity
             .cert
