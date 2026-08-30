@@ -1,0 +1,6 @@
+[[simple]]
+name = "dm.noa.re"
+namespace = "digital-membership"
+extra-resources = "extra"
+config = {"/config/digital-membership.toml" = "digital-membership.toml"}
+exernal-secret = "/keys"

@@ -1,0 +1,19 @@
+# Example configuration for digital-membership.
+#
+# The service reads /config/digital-membership.toml by default; pass
+# --config-file to point it somewhere else.
+
+bind_address = "0.0.0.0:8080"
+
+[[issuer]]
+id = "choir"
+description = "Example Choral Society"
+signing_key_path = "/keys/choir.key"
+name_model = "/uk-0.1.1.ncmp.xz"
+flags = ["Sheet music group", "Party planners"]
+
+[[issuer]]
+id = "fairer"
+# description = "Make Southwark fairer action group"
+signing_key_path = "/keys/fairer.key"
+name_model = "/uk-0.1.1.ncmp.xz"
