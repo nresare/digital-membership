@@ -44,15 +44,28 @@ as `--key-gen <PATH>`, and the file is created with `0600` permissions. An exist
 is never overwritten, since replacing a key silently invalidates every credential issued
 under it; remove it first if that is what you want.
 
-The file is ASCII: a single line holding the 32-byte scalar in unpadded URL-safe Base64,
-the same alphabet as the public key, terminated by a newline.
+The file is a self-describing ASCII TOML document naming the scheme the key belongs to:
 
-```text
-q7Jv0YfLpXn2wKcE4tRm9BdSaZhU1oGxN6iTlC3ePkA
+```toml
+# digital-membership signing key. Treat this file as a secret.
+# ciphersuite identifiers are defined by draft-irtf-cfrg-bls-signature.
+ciphersuite = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_"
+secret_key = "q7Jv0YfLpXn2wKcE4tRm9BdSaZhU1oGxN6iTlC3ePkA"
 ```
 
-Keeping it text means the key survives being pasted into a Secret manifest or copied
-between systems, and can be inspected without a hex dump.
+`ciphersuite` is the identifier defined by
+[draft-irtf-cfrg-bls-signature](https://datatracker.ietf.org/doc/draft-irtf-cfrg-bls-signature/),
+and matches the `algorithm` reported by `/api/provision`. The draft specifies the
+identifier and the signature scheme, but neither a secret key serialisation nor a
+container format, so the container above is this project's own: `secret_key` is the
+32-byte scalar in unpadded URL-safe Base64, the same alphabet as the public key.
+
+Naming the ciphersuite means a key belonging to a different BLS scheme — a different
+curve, a different hash, or the augmented or proof-of-possession variants — is rejected
+with a clear error rather than silently producing signatures no verifier accepts.
+
+Keeping the file text means the key survives being pasted into a Secret manifest or
+copied between systems, and can be inspected without a hex dump.
 
 The public key is printed to stdout as the 96-byte compressed G2 point in unpadded
 URL-safe Base64 — the same encoding `/api/provision` reports — so it can be captured
