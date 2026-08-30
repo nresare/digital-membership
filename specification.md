@@ -15,6 +15,8 @@ Version 1 authenticates:
 
 Names are encoded with `namecompress` against a separately distributed model. Credentials use BLS signatures over BLS12-381 in the minimal-signature-size variant.
 
+A verifier is configured out of band with the issuer's public key and `namecompress` model. Nothing in a credential selects them.
+
 ## 2. Binary representation
 
 ```text
@@ -34,10 +36,11 @@ No compressed-name-length field is encoded. The compressed name extends from the
 ## 3. Header
 
 ```text
-  7         5 4         2 1         0
- +-----------+-----------+-----------+
- | Version   | Key ID    | Flag size |
- +-----------+-----------+-----------+
+  7         5 4       3 2           0
+ +-----------+---------+-------------+
+ | Version   | Flag    | Flags 0–2   |
+ |           | size    |             |
+ +-----------+---------+-------------+
 ```
 
 ### Version
@@ -48,13 +51,9 @@ Version zero is reserved.
 
 Version 1 is not yet frozen. Until it is, this document may change what a version 1 credential contains without allocating a new version number, and an issuer and verifier pair MUST be built from the same draft.
 
-### Key ID
-
-Bits 4–2 contain a Key ID from 0 through 7. The identifier selects an issuer configuration containing both a compressed BLS12-381 G2 public key and a `namecompress` model. Both are configured out of band in the verifier.
-
 ### Flag-size code
 
-Bits 1–0 encode the number of flag bytes:
+Bits 4–3 encode the number of flag bytes:
 
 | Code | Meaning |
 |---|---|
@@ -66,6 +65,10 @@ Bits 1–0 encode the number of flag bytes:
 When the code is `11`, the byte immediately following the header contains the number of flag bytes. Its value MUST be between 3 and 255 inclusive.
 
 Encodings MUST use the shortest representation. An extended length of 0, 1, or 2 is invalid.
+
+### Flag bits
+
+Bits 2–0 hold flags 0, 1 and 2. They are the beginning of the flag bitset, which the flag data continues without a break; see section 6.
 
 ## 4. Issuance word
 
@@ -134,29 +137,41 @@ The identifier is intended to support revocation and to let a verifier recognise
 
 ## 6. Flags
 
-Flags are represented as a little-endian bitset.
+Flags are represented as a little-endian bitset that begins in the header and continues, without a break, through the flag data.
 
-Flag number `k` is stored in:
+The first three flags are the low three bits of the header, flag 0 in the least significant bit. Flag 3 onwards are the flag data, again from the least significant bit of its first byte.
+
+Flag number `k` is stored as follows.
+
+For `k` below 3, in the header:
 
 ```text
-byte index = floor(k / 8)
-bit index  = k modulo 8
+bit index = k
 ```
 
-Bit zero is the least significant bit of the first flag byte.
+For `k` of 3 or above, in the flag data:
+
+```text
+byte index = floor((k - 3) / 8)
+bit index  = (k - 3) modulo 8
+```
+
+The highest flag number is therefore 2042, from three bits in the header and 255 bytes of flag data.
 
 For example:
 
 ```text
-Flag data: 21 02
+Header:    ...00 001
+Flag data: 24 01
 
-21 = 00100001  → flags 0 and 5
-02 = 00000010  → flag 9
+001 =      001  → flag 0
+24  = 00100100  → flags 5 and 8
+01  = 00000001  → flag 11
 ```
 
-Thus, this example asserts flags 0, 5, and 9.
+Thus, this example asserts flags 0, 5, 8, and 11.
 
-Flag data MUST use its minimum possible length. When flag data is present, its final byte MUST be nonzero. A zero-valued flag set MUST be represented using zero flag bytes.
+Flag data MUST use its minimum possible length. When flag data is present, its final byte MUST be nonzero. A flag set that asserts nothing above flag 2 MUST be represented using zero flag bytes.
 
 The meaning of each flag is defined by an external issuer profile. Once assigned, a flag number MUST NOT be reused for a different meaning.
 
@@ -174,9 +189,9 @@ Before compression, the display name:
 - MUST NOT contain control characters.
 - MUST be encoded exactly as intended for display.
 
-The encoder MUST encode the exact display-name string with `namecompress::compress` and the model associated with the Key ID. The model's fingerprint is its `name_model_id` and SHOULD be distributed with the issuer's public-key metadata.
+The encoder MUST encode the exact display-name string with `namecompress::compress` and the issuer's model. The model's fingerprint is its `name_model_id` and SHOULD be distributed with the issuer's public-key metadata.
 
-A verifier MUST use the model associated with the Key ID to decompress the field. Decompression failure, including a `namecompress` wrong-table check, makes the credential invalid. A verifier MUST NOT normalize or modify the decompressed name. It MUST validate and display the name only after successful signature verification and decompression.
+A verifier MUST use the issuer's model to decompress the field. Decompression failure, including a `namecompress` wrong-table check, makes the credential invalid. A verifier MUST NOT normalize or modify the decompressed name. It MUST validate and display the name only after successful signature verification and decompression.
 
 ## 8. Signature
 
@@ -225,17 +240,17 @@ Given a credential containing `L` bytes, a verifier MUST:
 1. Reject it if `L < 51`.
 2. Interpret the final 48 bytes as the signature.
 3. Decode the header and reject any version other than 1.
-4. Determine the flag-data length.
+4. Determine the flag-data length from the flag-size code.
 5. Reject non-minimal or out-of-bounds flag encodings.
 6. Decode the issuance word into an issue day and an ID code.
 7. Determine the member-identifier length from the ID code and, for the text form, its length byte.
 8. Reject a non-minimal integer identifier, a zero-length text identifier, or a text identifier that is not valid UTF-8.
-9. Interpret the flag bytes as a bitset.
+9. Interpret the header's flag bits and the flag bytes as one bitset.
 10. Treat all remaining unsigned bytes as the compressed name.
-11. Resolve the Key ID to a trusted public key and `namecompress` model, and validate that the public key is a canonical, non-identity point in the correct subgroup of G2.
+11. Validate that the trusted public key is a canonical, non-identity point in the correct subgroup of G2.
 12. Validate that the signature is a canonical, non-identity point in the correct subgroup of G1.
 13. Verify the signature over the domain prefix and unsigned credential using the specified ciphersuite.
-14. Decompress the name with the model associated with the Key ID and reject any decompression error.
+14. Decompress the name with the issuer's model and reject any decompression error.
 15. Reject an issue day more than one day in the future, and apply the locally configured maximum age.
 16. Validate and display the decompressed name only after successful verification.
 
@@ -269,18 +284,23 @@ QR byte mode at error correction level M holds 62 bytes in a version 3 symbol an
 Suppose:
 
 - Version is 1.
-- Key ID is 2.
 - The credential is signed on `2026-08-30`, which is day 241.
 - The member identifier is the integer 4242, which needs two bytes.
-- One flag byte is present.
 - Flags 0 and 5 are asserted.
 - The name is `John Smith`.
 - The configured `namecompress` model encodes it as `C[0]` through `C[n-1]`.
 
+Flag 0 fits in the header. Flag 5 does not, so one flag byte is present, holding it in bit 2:
+
+```text
+Header flag bits: 001
+Flag data:        04
+```
+
 The header is:
 
 ```text
-001 010 01 = 0x29
+001 01 001 = 0x29
 ```
 
 The issuance word is day 241 shifted left by three bits, with ID code 2:
@@ -292,12 +312,12 @@ The issuance word is day 241 shifted left by three bits, with ID code 2:
 The unsigned credential is:
 
 ```text
-29 07 8A 10 92 21 C[0] ... C[n-1]
+29 07 8A 10 92 04 C[0] ... C[n-1]
 │  │     │     │  └────────────── compressed `namecompress` message
-│  │     │     └───────────────── flags 0 and 5
+│  │     │     └───────────────── flag 5
 │  │     └─────────────────────── member identifier 4242
 │  └───────────────────────────── issue day 241, ID code 2
-└──────────────────────────────── version 1, key 2, one flag byte
+└──────────────────────────────── version 1, one flag byte, flag 0
 ```
 
 The 48-byte compressed BLS signature follows these bytes.
@@ -312,20 +332,13 @@ Text armoring required by another transport is a separate encoding layer and is 
 
 ## 13. Security and privacy considerations
 
-The signature authenticates the compressed name, issue day, member identifier, and flags, but provides no confidentiality. Compression is not encryption: anyone who obtains the QR code and the separately distributed model can recover the display name and flags. The issue day and member identifier are in clear view of any scanner.
+Digital membership card systems implementing this spec is explicitly not designed to provide confidentiality for the
+name, id and flags stored. The security model is the same as a physical plastic or paper membership card with a name
+and membership number printed on the back. The user of a digital identity card is expected to keep the code confidential
+the same way one would a concert ticket or physical membership card.
 
-Dietary requirements, political affiliations, protected-group membership, and similar flags may constitute sensitive personal information. Issuers should include only information required at the point of scanning.
+What the algorithm provides is a way to validate that the card was properly issued by the organisation it claims to,
+the equivalent of using quality materials to make it more difficult to create a counterfeit memebership card.
 
-The member identifier is stable across re-issued credentials, which is what makes revocation and recognition possible, and also what makes every scan of the same member linkable to every other by anyone who can read the code. An issuer that does not need to recognise a member across credentials should omit the identifier. An identifier that encodes something about the member, such as a joining sequence or a national identity number, discloses that to every scanner and should not be used.
-
-The issue day narrows the window in which a leaked credential is useful, but only to the extent that a verifier enforces a maximum age. It is not an expiry: a verifier that ignores it accepts an arbitrarily old credential.
-
-Version 1 does not provide:
-
-- Bearer identity verification
-- An issuer-asserted validity period
-- Online revocation
-- Event restriction
-- Protection against copying or screenshot sharing
-
-The member identifier makes an offline revocation list possible, but distributing one is out of scope for this document.
+The issuance date is intended to enable readers to warn if the card was issued a long time ago, encourage the user
+to create a new one. Such setups are outside the scope of this specification. 
