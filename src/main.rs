@@ -65,12 +65,15 @@ async fn run() -> anyhow::Result<()> {
         version = VERSION,
         config_path = %cli.config_path.display(),
         address = %config.bind_address,
-        name_model = %config.name_model.display(),
+        issuers = config.issuers.len(),
         wallet = config.wallet.is_some(),
         "starting digital-membership"
     );
 
-    let state = AppState::generate_with_wallet(&config.name_model, config.wallet)?;
+    let state = AppState::load(config.issuers, config.wallet)?;
+    for id in state.issuer_ids() {
+        info!(issuer = id, "serving /api/{id}/");
+    }
     let listener = tokio::net::TcpListener::bind(config.bind_address).await?;
     info!(address = %config.bind_address, "listening");
     axum::serve(listener, app(state)).await?;

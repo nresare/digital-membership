@@ -5,12 +5,40 @@
 
 bind_address = "0.0.0.0:8080"
 
-# Path to the namecompress model table used to compress names before signing.
-# Either an uncompressed .ncmp table or an XZ-compressed one.
+# One [[issuer]] block per membership organisation this instance signs for.
+# Each is served under /api/{id}/, so /api/example/qr issues a credential
+# signed by the issuer below and /api/example/provision tells a scanner how to
+# verify it.
+[[issuer]]
+# Short identifier used as a URL path segment: ASCII letters, digits, '-', '_'.
+id = "example"
+# Shown to whoever is scanning, via the provisioning endpoint.
+description = "Example Membership Society"
+# Signing key written by `digital-membership --key-gen`. The file is the only
+# copy of the secret, so mount it from a Secret and keep a backup: replacing it
+# invalidates every credential issued under it.
+signing_key_path = "/secrets/example.secret"
+# The namecompress model table used to compress names before signing. Either an
+# uncompressed .ncmp table or an XZ-compressed one.
 name_model = "/config/english.ncmp.xz"
+# Labels for this issuer's flags. Position in the list is the flag number, so
+# "member" is flag 0 and "vegetarian" is flag 2. An empty string leaves that
+# number unnamed while keeping the ones after it in place; never reorder or
+# remove an entry, because that silently changes what an issued credential
+# means. Requests may name a flag by label or by number.
+flags = ["member", "committee", "vegetarian", "under-18"]
+
+# A second issuer, with its own key, model and flags, served under /api/choir/.
+# [[issuer]]
+# id = "choir"
+# description = "Example Choral Society"
+# signing_key_path = "/secrets/choir.secret"
+# name_model = "/config/english.ncmp.xz"
+# flags = ["member", "conductor"]
 
 # Apple Wallet support is optional; omit the whole section to disable it, in
-# which case GET /api/wallet responds with HTTP 503.
+# which case GET /api/{id}/wallet responds with HTTP 503. The configured pass
+# identity is shared by every issuer.
 [wallet]
 # Pass Type signing identity exported as PKCS#12, without an export password:
 # the file is itself the secret, so mount it from a Secret.
