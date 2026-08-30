@@ -90,6 +90,7 @@ impl AppState {
 
 pub fn app(state: AppState) -> Router {
     Router::new()
+        .route("/setup", get(setup))
         .route("/api/healthz", get(healthz))
         .route("/api/{issuer}/qr", get(qr_code_get).post(qr_code_post))
         .route("/api/{issuer}/wallet", get(wallet_pass_get))
@@ -252,6 +253,37 @@ fn generate_credential(issuer: &Issuer, request: &QrRequest) -> Result<Vec<u8>, 
         &issuer.name_model,
         issuer.signing_key.secret(),
     )
+}
+
+/// The bootstrap document at `/setup`: enough for a scanner to list the issuers
+/// this service signs for and let someone pick one, without knowing any of their
+/// ids in advance.
+#[derive(Debug, Serialize)]
+struct SetupResponse {
+    issuers: Vec<SetupIssuer>,
+}
+
+#[derive(Debug, Serialize)]
+struct SetupIssuer {
+    id: String,
+    description: String,
+    /// Where to fetch this issuer's provisioning metadata, relative to the
+    /// service origin.
+    provision_url: String,
+}
+
+async fn setup(State(state): State<AppState>) -> Json<SetupResponse> {
+    Json(SetupResponse {
+        issuers: state
+            .issuers
+            .values()
+            .map(|issuer| SetupIssuer {
+                id: issuer.id.clone(),
+                description: issuer.description.clone(),
+                provision_url: issuer.provision_url(),
+            })
+            .collect(),
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -519,6 +551,53 @@ mod tests {
             .unwrap();
         let downloaded_model = namecompress::Table::load(&decompressed).unwrap();
         assert_eq!(downloaded_model.id, expected_model.id);
+    }
+
+    #[tokio::test]
+    async fn setup_lists_every_issuer_with_a_link_to_its_provisioning_metadata() {
+        let mut choir = test_issuer();
+        choir.id = "choir".to_string();
+        choir.description = "Example Choral Society".to_string();
+        let state = AppState {
+            issuers: Arc::new(
+                [test_issuer(), choir]
+                    .into_iter()
+                    .map(|issuer| (issuer.id.clone(), issuer))
+                    .collect(),
+            ),
+            wallet: None,
+        };
+
+        let response = app(state)
+            .oneshot(Request::get("/setup").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            String::from_utf8(body.to_vec()).unwrap(),
+            concat!(
+                r#"{"issuers":["#,
+                r#"{"id":"choir","description":"Example Choral Society","#,
+                r#""provision_url":"/api/choir/provision"},"#,
+                r#"{"id":"example","description":"Example Membership Society","#,
+                r#""provision_url":"/api/example/provision"}"#,
+                r#"]}"#
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_needs_no_issuer_in_its_path() {
+        // The whole point is that a scanner can reach it knowing only the
+        // origin, so it must not sit under /api/{issuer}/.
+        let response = test_app()
+            .oneshot(Request::get("/api/setup").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
