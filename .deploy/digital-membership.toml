@@ -14,6 +14,6 @@ flags = ["Sheet music group", "Party planners"]
 
 [[issuer]]
 id = "fairer"
-# description = "Make Southwark fairer action group"
+description = "Make Southwark fairer action group"
 signing_key_path = "/keys/fairer.key"
 name_model = "/uk-0.1.1.ncmp.xz"
