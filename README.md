@@ -40,9 +40,19 @@ digital-membership --key-gen
 ```
 
 The key is written to `signing-key.secret` in the current directory, or to a path given
-as `--key-gen <PATH>`. The file holds the 32-byte scalar and is created with `0600`
-permissions. An existing file is never overwritten, since replacing a key silently
-invalidates every credential issued under it; remove it first if that is what you want.
+as `--key-gen <PATH>`, and the file is created with `0600` permissions. An existing file
+is never overwritten, since replacing a key silently invalidates every credential issued
+under it; remove it first if that is what you want.
+
+The file is ASCII: a single line holding the 32-byte scalar in unpadded URL-safe Base64,
+the same alphabet as the public key, terminated by a newline.
+
+```text
+q7Jv0YfLpXn2wKcE4tRm9BdSaZhU1oGxN6iTlC3ePkA
+```
+
+Keeping it text means the key survives being pasted into a Secret manifest or copied
+between systems, and can be inspected without a hex dump.
 
 The public key is printed to stdout as the 96-byte compressed G2 point in unpadded
 URL-safe Base64 — the same encoding `/api/provision` reports — so it can be captured
