@@ -20,7 +20,8 @@ bind_address = "127.0.0.1:8080"
 
 [[issuer]]
 id = "example"
-description = "Example Membership Society"
+name = "Example Membership Society"
+description = "Members of the society, in good standing"
 signing_key_path = "/path/to/example.secret"
 name_model = "/path/to/names.ncmp"
 flags = ["member", "committee", "vegetarian"]
@@ -38,7 +39,8 @@ share nothing but the listening socket and the Wallet identity.
 | Key | Required | Meaning |
 |---|---|---|
 | `id` | yes | Short identifier used as a URL path segment. ASCII letters, digits, `-` and `_` only, and unique across the file. |
-| `description` | yes | Human-readable name, published by the issuer's provisioning endpoint so a scanner can show whose credential it is checking. |
+| `name` | yes | Human-readable name, published by the issuer's provisioning endpoint so a scanner can show whose credential it is checking. |
+| `description` | no | A brief description of the issuer, published alongside the name as supporting detail. Left out of the responses when it is not configured. |
 | `signing_key_path` | yes | Path to a signing key written by `--key-gen`. Loaded and validated at startup. |
 | `name_model` | yes | Path to a [`namecompress`](https://github.com/nresare/namecompress) model table, uncompressed or XZ-compressed; compression is detected from the file contents. Verifiers need the same model to decode names, and can fetch it from the issuer's model endpoint. |
 | `flags` | no | Labels for this issuer's flags, where position in the list is the flag number. |
@@ -219,19 +221,20 @@ server.
   "issuers": [
     {
       "id": "example",
-      "description": "Example Membership Society",
+      "name": "Example Membership Society",
+      "description": "Members of the society, in good standing",
       "provision_url": "/api/example/provision"
     },
     {
       "id": "choir",
-      "description": "Example Choral Society",
+      "name": "Example Choral Society",
       "provision_url": "/api/choir/provision"
     }
   ]
 }
 ```
 
-This is the one endpoint a scanner can reach knowing nothing but the service origin, which is why it sits outside `/api` rather than under an issuer path. Point a scanner at `https://example.com/setup`, show the `description` of each entry, and fetch the `provision_url` of whichever the user picks to get that issuer's key, model and flag labels. `provision_url` is relative to the service origin.
+This is the one endpoint a scanner can reach knowing nothing but the service origin, which is why it sits outside `/api` rather than under an issuer path. Point a scanner at `https://example.com/setup`, show the `name` of each entry, and fetch the `provision_url` of whichever the user picks to get that issuer's key, model and flag labels. `provision_url` is relative to the service origin.
 
 Issuers are listed in order of `id`, not in the order they appear in the config file, so the list is stable across edits.
 
@@ -244,7 +247,8 @@ that issuer's credentials:
 {
   "algorithm": "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_",
   "id": "example",
-  "description": "Example Membership Society",
+  "name": "Example Membership Society",
+  "description": "Members of the society, in good standing",
   "name_model_id": 1234567890,
   "name_model_url": "/api/example/model/model.ncmp.xz",
   "public_key": "<base64url without padding>",
@@ -253,8 +257,9 @@ that issuer's credentials:
 ```
 
 `public_key` is the 96-byte compressed BLS12-381 G2 public key encoded with unpadded
-URL-safe Base64. Credentials contain 48-byte compressed G1 signatures. `description` is
-what a scanner shows to say whose membership it is checking, and `flags` gives it the
+URL-safe Base64. Credentials contain 48-byte compressed G1 signatures. `name` is
+what a scanner shows to say whose membership it is checking, `description` is optional
+supporting detail and absent when the issuer configures none, and `flags` gives it the
 name of each flag a credential can assert, indexed by flag number, with an empty string
 where a number has no label.
 

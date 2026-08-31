@@ -25,7 +25,12 @@ pub struct IssuerConfig {
 
     /// Human-readable name of the issuer, published by `/api/{id}/provision` so
     /// a scanner can show whose credential it is verifying.
-    pub description: String,
+    pub name: String,
+
+    /// A brief description of the issuer, published alongside the name for a
+    /// scanner to show as supporting detail. Optional.
+    #[serde(default)]
+    pub description: Option<String>,
 
     /// Path to the signing key written by `--key-gen`.
     pub signing_key_path: PathBuf,
@@ -57,8 +62,14 @@ impl IssuerConfig {
                 self.id
             );
         }
-        if self.description.is_empty() {
-            anyhow::bail!("issuer '{}' must have a description", self.id);
+        if self.name.is_empty() {
+            anyhow::bail!("issuer '{}' must have a name", self.id);
+        }
+        if self.description.as_ref().is_some_and(String::is_empty) {
+            anyhow::bail!(
+                "issuer '{}' has an empty description; leave it out instead",
+                self.id
+            );
         }
         if self.signing_key_path.as_os_str().is_empty() {
             anyhow::bail!("issuer '{}' must have a signing_key_path", self.id);
@@ -119,7 +130,8 @@ impl FlagRef {
 /// An issuer with its key and name model loaded and ready to sign.
 pub(crate) struct Issuer {
     pub(crate) id: String,
-    pub(crate) description: String,
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
     pub(crate) signing_key: SigningKey,
     pub(crate) name_model: Table,
     pub(crate) compressed_name_model: Arc<[u8]>,
@@ -147,6 +159,7 @@ impl Issuer {
 
         Ok(Self {
             id: config.id,
+            name: config.name,
             description: config.description,
             signing_key,
             name_model,
@@ -244,7 +257,8 @@ mod tests {
     fn config(id: &str, flags: &[&str]) -> IssuerConfig {
         IssuerConfig {
             id: id.to_string(),
-            description: "Example Society".to_string(),
+            name: "Example Society".to_string(),
+            description: None,
             signing_key_path: "key.secret".into(),
             name_model: "names.ncmp".into(),
             flags: flags.iter().map(|flag| (*flag).to_string()).collect(),
@@ -255,7 +269,8 @@ mod tests {
         let key: SigningKey = SecretKey::key_gen_v5(&[7_u8; 32], &[], &[]).unwrap().into();
         Issuer {
             id: "example".to_string(),
-            description: "Example Society".to_string(),
+            name: "Example Society".to_string(),
+            description: None,
             signing_key: key,
             name_model: test_name_model(),
             compressed_name_model: Arc::from(Vec::new()),
@@ -350,9 +365,13 @@ mod tests {
 
     #[test]
     fn rejects_missing_required_fields() {
-        let mut missing_description = config("example", &[]);
-        missing_description.description = String::new();
-        assert!(missing_description.validate().is_err());
+        let mut missing_name = config("example", &[]);
+        missing_name.name = String::new();
+        assert!(missing_name.validate().is_err());
+
+        let mut empty_description = config("example", &[]);
+        empty_description.description = Some(String::new());
+        assert!(empty_description.validate().is_err());
 
         let mut missing_key = config("example", &[]);
         missing_key.signing_key_path = "".into();

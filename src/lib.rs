@@ -266,7 +266,9 @@ struct SetupResponse {
 #[derive(Debug, Serialize)]
 struct SetupIssuer {
     id: String,
-    description: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     /// Where to fetch this issuer's provisioning metadata, relative to the
     /// service origin.
     provision_url: String,
@@ -279,6 +281,7 @@ async fn setup(State(state): State<AppState>) -> Json<SetupResponse> {
             .values()
             .map(|issuer| SetupIssuer {
                 id: issuer.id.clone(),
+                name: issuer.name.clone(),
                 description: issuer.description.clone(),
                 provision_url: issuer.provision_url(),
             })
@@ -290,7 +293,9 @@ async fn setup(State(state): State<AppState>) -> Json<SetupResponse> {
 struct ProvisionResponse {
     algorithm: &'static str,
     id: String,
-    description: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     name_model_id: u32,
     name_model_url: String,
     public_key: String,
@@ -307,6 +312,7 @@ async fn provision(
     Ok(Json(ProvisionResponse {
         algorithm: BLS_CIPHERSUITE,
         id: issuer.id.clone(),
+        name: issuer.name.clone(),
         description: issuer.description.clone(),
         name_model_id: issuer.name_model.id,
         name_model_url: issuer.name_model_url(),
@@ -349,7 +355,8 @@ mod tests {
         encoder.write_all(&model.write()).unwrap();
         Issuer {
             id: "example".to_string(),
-            description: "Example Membership Society".to_string(),
+            name: "Example Membership Society".to_string(),
+            description: None,
             signing_key: SecretKey::key_gen_v5(&[7_u8; 32], &[], &[]).unwrap().into(),
             name_model: model,
             compressed_name_model: encoder.finish().unwrap().into(),
@@ -525,7 +532,9 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains(r#""algorithm":"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_""#));
         assert!(body.contains(r#""id":"example""#));
-        assert!(body.contains(r#""description":"Example Membership Society""#));
+        assert!(body.contains(r#""name":"Example Membership Society""#));
+        // The issuer configures no description, so the key is left out.
+        assert!(!body.contains(r#""description""#), "{body}");
         assert!(body.contains(r#""name_model_id":"#));
         assert!(body.contains(r#""name_model_url":"/api/example/model/model.ncmp.xz""#));
         assert!(body.contains(r#""flags":["member","","vegetarian"]"#));
@@ -567,7 +576,8 @@ mod tests {
     async fn setup_lists_every_issuer_with_a_link_to_its_provisioning_metadata() {
         let mut choir = test_issuer();
         choir.id = "choir".to_string();
-        choir.description = "Example Choral Society".to_string();
+        choir.name = "Example Choral Society".to_string();
+        choir.description = Some("Sings on Tuesdays".to_string());
         let state = AppState {
             issuers: Arc::new(
                 [test_issuer(), choir]
@@ -589,9 +599,10 @@ mod tests {
             String::from_utf8(body.to_vec()).unwrap(),
             concat!(
                 r#"{"issuers":["#,
-                r#"{"id":"choir","description":"Example Choral Society","#,
+                r#"{"id":"choir","name":"Example Choral Society","#,
+                r#""description":"Sings on Tuesdays","#,
                 r#""provision_url":"/api/choir/provision"},"#,
-                r#"{"id":"example","description":"Example Membership Society","#,
+                r#"{"id":"example","name":"Example Membership Society","#,
                 r#""provision_url":"/api/example/provision"}"#,
                 r#"]}"#
             )
@@ -614,7 +625,7 @@ mod tests {
     async fn each_issuer_signs_with_its_own_key() {
         let mut choir = test_issuer();
         choir.id = "choir".to_string();
-        choir.description = "Example Choral Society".to_string();
+        choir.name = "Example Choral Society".to_string();
         choir.signing_key = SecretKey::key_gen_v5(&[9_u8; 32], &[], &[]).unwrap().into();
         let expected = choir.signing_key.public_key_base64();
         let state = AppState {

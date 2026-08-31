@@ -7,13 +7,14 @@ bind_address = "0.0.0.0:8080"
 
 [[issuer]]
 id = "choir"
-description = "Example Choral Society"
+name = "Example Choir Society"
 signing_key_path = "/keys/choir.key"
 name_model = "/uk-0.1.1.ncmp.xz"
 flags = ["Sheet music group", "Party planners"]
 
 [[issuer]]
 id = "fairer"
-description = "Make Southwark fairer action group"
+name = "Make Southwark fairer"
+description = "We change local politics"
 signing_key_path = "/keys/fairer.key"
 name_model = "/uk-0.1.1.ncmp.xz"

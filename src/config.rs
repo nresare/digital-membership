@@ -66,7 +66,7 @@ mod tests {
     const ISSUER: &str = r#"
         [[issuer]]
         id = "example"
-        description = "Example Membership Society"
+        name = "Example Membership Society"
         signing_key_path = "example.secret"
         name_model = "names.ncmp"
     "#;
@@ -98,14 +98,15 @@ mod tests {
             r#"
             [[issuer]]
             id = "example"
-            description = "Example Membership Society"
+            name = "Example Membership Society"
             signing_key_path = "example.secret"
             name_model = "names.ncmp"
             flags = ["member", "", "vegetarian"]
 
             [[issuer]]
             id = "choir"
-            description = "Example Choral Society"
+            name = "Example Choral Society"
+            description = "Sings on Tuesdays"
             signing_key_path = "choir.secret"
             name_model = "names.ncmp"
             "#,
@@ -114,8 +115,14 @@ mod tests {
 
         assert_eq!(config.issuers.len(), 2);
         assert_eq!(config.issuers[0].id, "example");
+        assert_eq!(config.issuers[0].name, "Example Membership Society");
+        assert_eq!(config.issuers[0].description, None);
         assert_eq!(config.issuers[0].flags, ["member", "", "vegetarian"]);
         assert_eq!(config.issuers[1].id, "choir");
+        assert_eq!(
+            config.issuers[1].description.as_deref(),
+            Some("Sings on Tuesdays")
+        );
         assert!(config.issuers[1].flags.is_empty());
     }
 
@@ -132,7 +139,7 @@ mod tests {
             r#"
             [[issuer]]
             id = "example"
-            description = ""
+            name = ""
             signing_key_path = "example.secret"
             name_model = "names.ncmp"
             "#,
@@ -140,7 +147,7 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(error.contains("description"), "{error}");
+        assert!(error.contains("must have a name"), "{error}");
     }
 
     #[test]
@@ -154,7 +161,7 @@ mod tests {
             r#"
             [[issuer]]
             id = "example"
-            description = "Example Membership Society"
+            name = "Example Membership Society"
             signing_key_path = "example.secret"
             name_modle = "names.ncmp"
             "#,
