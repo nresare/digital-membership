@@ -13,7 +13,9 @@ bind_address = "0.0.0.0:8080"
 # Short identifier used as a URL path segment: ASCII letters, digits, '-', '_'.
 id = "example"
 # Shown to whoever is scanning, via the provisioning endpoint.
-description = "Example Membership Society"
+name = "Example Membership Society"
+# An optional brief description, shown alongside the name.
+description = "Members of the society, in good standing"
 # Signing key written by `digital-membership --key-gen`. The file is the only
 # copy of the secret, so mount it from a Secret and keep a backup: replacing it
 # invalidates every credential issued under it.
@@ -31,7 +33,8 @@ flags = ["member", "committee", "vegetarian", "under-18"]
 # A second issuer, with its own key, model and flags, served under /api/choir/.
 # [[issuer]]
 # id = "choir"
-# description = "Example Choral Society"
+# name = "Example Choral Society"
+# description = "Sings on Tuesdays"
 # signing_key_path = "/secrets/choir.secret"
 # name_model = "/config/english.ncmp.xz"
 # flags = ["member", "conductor"]
