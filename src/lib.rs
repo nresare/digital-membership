@@ -1,5 +1,6 @@
 mod credential;
 mod error;
+mod form;
 mod issuer;
 mod signing;
 mod wallet;
@@ -92,6 +93,8 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/setup", get(setup))
         .route("/healthz", get(healthz))
+        .route("/test", get(form::form))
+        .route("/test/qr", get(form::qr))
         .route("/api/{issuer}/qr", get(qr_code_get).post(qr_code_post))
         .route("/api/{issuer}/wallet", get(wallet_pass_get))
         .route("/api/{issuer}/provision", get(provision))
@@ -204,13 +207,13 @@ fn parse_qr_query(query: Option<&str>) -> Result<QrRequest, AppError> {
 }
 
 fn generate_qr_code(issuer: &Issuer, request: &QrRequest) -> Result<Response<Body>, AppError> {
-    let credential = generate_credential(issuer, request)?;
-    let symbol = Encoder::new(ErrorCorrection::Medium)
-        .encode_bytes(&credential)
-        .map_err(|error| AppError::Internal(format!("failed to encode QR code: {error}")))?;
-    let png = Renderer::new(&symbol, QR_IMAGE_SIZE)
-        .to_png_vec()
-        .map_err(|error| AppError::Internal(format!("failed to render QR code: {error}")))?;
+    let credential = generate_credential(
+        issuer,
+        &request.name,
+        &request.flags,
+        &request.identifier()?,
+    )?;
+    let png = qr_png(&credential)?;
 
     Response::builder()
         .header(header::CONTENT_TYPE, "image/png")
@@ -228,7 +231,12 @@ async fn wallet_pass_get(
     let wallet = state.wallet.as_ref().ok_or_else(|| {
         AppError::Unavailable("Apple Wallet support is not configured".to_string())
     })?;
-    let credential = generate_credential(issuer, &request)?;
+    let credential = generate_credential(
+        issuer,
+        &request.name,
+        &request.flags,
+        &request.identifier()?,
+    )?;
     let pass = wallet
         .build(&request.name, &credential)
         .map_err(|error| AppError::Internal(format!("failed to build Wallet pass: {error:#}")))?;
@@ -244,11 +252,26 @@ async fn wallet_pass_get(
         .map_err(|error| AppError::Internal(format!("failed to build response: {error}")))
 }
 
-fn generate_credential(issuer: &Issuer, request: &QrRequest) -> Result<Vec<u8>, AppError> {
+/// Renders a credential as the PNG the QR endpoints and the test page serve.
+fn qr_png(credential: &[u8]) -> Result<Vec<u8>, AppError> {
+    let symbol = Encoder::new(ErrorCorrection::Medium)
+        .encode_bytes(credential)
+        .map_err(|error| AppError::Internal(format!("failed to encode QR code: {error}")))?;
+    Renderer::new(&symbol, QR_IMAGE_SIZE)
+        .to_png_vec()
+        .map_err(|error| AppError::Internal(format!("failed to render QR code: {error}")))
+}
+
+fn generate_credential(
+    issuer: &Issuer,
+    name: &str,
+    flags: &[FlagRef],
+    identifier: &Identifier,
+) -> Result<Vec<u8>, AppError> {
     encode_credential(
-        &request.name,
-        &issuer.resolve_flags(&request.flags)?,
-        &request.identifier()?,
+        name,
+        &issuer.resolve_flags(flags)?,
+        identifier,
         issue_day_now()?,
         &issuer.name_model,
         issuer.signing_key.secret(),
@@ -607,6 +630,115 @@ mod tests {
                 r#"]}"#
             )
         );
+    }
+
+    #[tokio::test]
+    async fn test_form_offers_every_issuer_and_its_labelled_flags() {
+        let mut choir = test_issuer();
+        choir.id = "choir".to_string();
+        choir.name = "Example Choral Society".to_string();
+        choir.flags = vec!["conductor".to_string()];
+        let state = AppState {
+            issuers: Arc::new(
+                [test_issuer(), choir]
+                    .into_iter()
+                    .map(|issuer| (issuer.id.clone(), issuer))
+                    .collect(),
+            ),
+            wallet: None,
+        };
+
+        let response = app(state)
+            .oneshot(Request::get("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains(r#"<option value="choir">Example Choral Society</option>"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"<option value="example">Example Membership Society</option>"#),
+            "{body}"
+        );
+        assert!(body.contains(r#"<input type="text" name="name""#), "{body}");
+        assert!(body.contains(r#"<input type="text" name="id""#), "{body}");
+        assert!(
+            body.contains(r#"<input type="checkbox" name="flags" value="vegetarian">"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"<input type="checkbox" name="flags" value="conductor">"#),
+            "{body}"
+        );
+        assert!(body.contains(">generate</button>"), "{body}");
+        // The unlabelled flag 1 has no name to show, so it gets no checkbox.
+        assert_eq!(body.matches(r#"name="flags""#).count(), 3);
+        // Only the first issuer's flags are submitted until the script runs.
+        assert_eq!(body.matches("<fieldset").count(), 2);
+        assert_eq!(body.matches(" disabled hidden>").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_form_result_embeds_a_qr_code() {
+        let response = test_app()
+            .oneshot(
+                Request::get(
+                    "/test/qr?issuer=example&name=Alice&id=4242&flags=member&flags=vegetarian",
+                )
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let encoded = body
+            .split_once(r#"<img src="data:image/png;base64,"#)
+            .expect("the page should embed a QR code")
+            .1
+            .split_once('"')
+            .unwrap()
+            .0;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(body.contains("4242 (number)"), "{body}");
+        assert!(body.contains("member, vegetarian"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn test_form_result_reports_what_it_cannot_issue() {
+        for (query, status) in [
+            ("issuer=nobody&name=Alice", StatusCode::NOT_FOUND),
+            ("issuer=example", StatusCode::BAD_REQUEST),
+            ("name=Alice", StatusCode::BAD_REQUEST),
+            (
+                "issuer=example&name=Alice&flags=committee",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = test_app()
+                .oneshot(
+                    Request::get(format!("/test/qr?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.status(), status, "{query}");
+        }
     }
 
     #[tokio::test]

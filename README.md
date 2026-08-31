@@ -275,3 +275,18 @@ issuer's endpoint and verifies against the key it was given there.
 ### Health check
 
 `GET /healthz` returns HTTP 200 while the service is running.
+
+## Issue a credential from a browser
+
+`GET /test` serves a small HTML form for issuing a credential by hand, which is enough
+to try an issuer out without a client that speaks the API. Pick the issuer, type a name
+and an optional id, tick the flags to assert and press **generate**; the result page
+shows the credential as a QR code, along with what went into it.
+
+Only labelled flags get a checkbox, since an unlabelled number has nothing to show. An
+id of plain digits is carried as a number, which encodes more compactly; anything a
+number would not preserve, such as the leading zeros of `007`, is carried as text.
+
+The form has no authentication in front of it and will issue a credential to whoever
+asks, exactly as `/api/{issuer}/qr` does. Keep the service off the public internet, or
+behind something that authenticates, if that matters.
