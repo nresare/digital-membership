@@ -26,7 +26,7 @@ signature = "2.2.0"
 thiserror = "2.0"
 tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread"] }
 toml = "1.0"
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x509-cert = { version = "0.2.5", features = ["pem", "builder"] }
