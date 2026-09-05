@@ -19,6 +19,6 @@ description = "We change local politics"
 signing_key_path = "/keys/fairer.key"
 name_model = "/uk-0.1.1.ncmp.xz"
 
-[[wallet]]
+[wallet]
 key_path = "/keys/wallet.key"
 cert_path = "/config/wallet-cert.pem"
