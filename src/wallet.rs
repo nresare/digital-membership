@@ -1,12 +1,19 @@
 use anyhow::Context;
-use openssl::nid::Nid;
-use openssl::pkcs7::{Pkcs7, Pkcs7Flags};
-use openssl::pkey::{PKey, Private};
-use openssl::stack::Stack;
-use openssl::x509::X509;
+use cms::builder::{SignedDataBuilder, SignerInfoBuilder, create_signing_time_attribute};
+use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
+use cms::signed_data::{EncapsulatedContentInfo, SignerIdentifier};
+use der::asn1::{
+    Ia5StringRef, ObjectIdentifier, PrintableStringRef, TeletexStringRef, Utf8StringRef,
+};
+use der::{Decode, DecodePem, Encode, Tag, Tagged};
+use rsa::pkcs1::DecodeRsaPrivateKey;
+use rsa::pkcs1v15::{SigningKey, VerifyingKey};
+use rsa::pkcs8::{DecodePrivateKey, DecodePublicKey};
+use rsa::{Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest as _, Sha1};
 use sha2::Sha256;
+use signature::{Keypair, Signer, Verifier};
 use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
@@ -18,6 +25,13 @@ const WWDR_G4_SUBJECT_KEY_ID: [u8; 20] = [
     0x5b, 0xd9, 0xfa, 0x1d, 0xe7, 0x9a, 0x1a, 0x0b, 0xa3, 0x99, 0x76, 0x22, 0x50, 0x86, 0x3e, 0x91,
     0xc8, 0x5b, 0x77, 0xa8,
 ];
+const USER_ID_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("0.9.2342.19200300.100.1.1");
+const ORGANIZATIONAL_UNIT_NAME_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.11");
+const AUTHORITY_KEY_IDENTIFIER_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.35");
+const SUBJECT_KEY_IDENTIFIER_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.14");
+const DATA_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1");
+const SHA256_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
+const SHA256_WITH_RSA_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11");
 
 const ICON_SIZES: [(&str, u32); 3] = [("icon.png", 29), ("icon@2x.png", 58), ("icon@3x.png", 87)];
 
@@ -37,9 +51,9 @@ fn default_org_name() -> String {
 }
 
 pub(crate) struct WalletPass {
-    certificate: X509,
-    private_key: PKey<Private>,
-    certificate_chain: Vec<X509>,
+    certificate: x509_cert::Certificate,
+    private_key: BlindedRsaSigningKey,
+    certificate_chain: Vec<x509_cert::Certificate>,
     pass_type_identifier: String,
     team_identifier: String,
     organization_name: String,
@@ -50,14 +64,19 @@ impl WalletPass {
         let key_bytes = std::fs::read(&config.key_path).with_context(|| {
             format!("failed to read Wallet key '{}'", config.key_path.display())
         })?;
-        let private_key = PKey::private_key_from_pem_callback(&key_bytes, |_| {
-            // Encrypted keys are unsupported; never prompt on server startup.
-            Ok(0)
-        })
-        .context("failed to parse Wallet private key as unencrypted PEM")?;
+        let key_text = std::str::from_utf8(&key_bytes)
+            .context("failed to parse Wallet private key as PEM: file is not UTF-8")?;
+        let private_key = RsaPrivateKey::from_pkcs8_pem(key_text)
+            .or_else(|_| RsaPrivateKey::from_pkcs1_pem(key_text))
+            .context("failed to parse Wallet private key as unencrypted PKCS#8 or PKCS#1 PEM")?;
+        private_key
+            .validate()
+            .context("Wallet private key failed RSA validation")?;
         let certificate = read_pem_certificate(&config.cert_path, "cert_path")?;
+        let certificate_public_key = certificate_public_key(&certificate)
+            .context("failed to read RSA public key from Wallet certificate")?;
         anyhow::ensure!(
-            certificate.public_key()?.public_eq(&private_key),
+            certificate_public_key == RsaPublicKey::from(&private_key),
             "Wallet private key does not match the certificate in cert_path"
         );
         let intermediate = match &config.intermediate_cert_path {
@@ -65,25 +84,25 @@ impl WalletPass {
             None => embedded_intermediate(&certificate)?,
         };
         anyhow::ensure!(
-            certificate.issuer_name().to_der()? == intermediate.subject_name().to_der()?
-                && certificate.verify(intermediate.public_key()?.as_ref())?,
+            certificate.tbs_certificate.issuer == intermediate.tbs_certificate.subject
+                && verify_certificate_signature(&certificate, &intermediate).is_ok(),
             "Wallet intermediate certificate did not issue the certificate in cert_path; \
              configure intermediate_cert_path with the matching PEM certificate, probably available from \
              https://www.apple.com/certificateauthority/"
         );
-        let pass_type_identifier = subject_identifier(&certificate, Nid::USERID, "UID")?;
+        let pass_type_identifier = subject_identifier(&certificate, USER_ID_OID, "UID")?;
         anyhow::ensure!(
             pass_type_identifier.starts_with("pass.") && pass_type_identifier.len() > 5,
             "Wallet certificate subject UID must be a Pass Type identifier starting with 'pass.'"
         );
-        let team_identifier = subject_identifier(&certificate, Nid::ORGANIZATIONALUNITNAME, "OU")?;
+        let team_identifier = subject_identifier(&certificate, ORGANIZATIONAL_UNIT_NAME_OID, "OU")?;
         anyhow::ensure!(
             !config.org_name.trim().is_empty(),
             "wallet.org_name must not be empty"
         );
         Ok(Self {
             certificate,
-            private_key,
+            private_key: BlindedRsaSigningKey(SigningKey::new(private_key)),
             certificate_chain: vec![intermediate],
             pass_type_identifier,
             team_identifier,
@@ -148,25 +167,98 @@ impl WalletPass {
     }
 
     fn sign(&self, manifest: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let mut certificates = Stack::new()?;
-        for certificate in &self.certificate_chain {
-            certificates.push(certificate.clone())?;
-        }
-        let signature = Pkcs7::sign(
-            &self.certificate,
+        let content = EncapsulatedContentInfo {
+            econtent_type: DATA_OID,
+            econtent: None,
+        };
+        let digest_algorithm = x509_cert::spki::AlgorithmIdentifierOwned {
+            oid: SHA256_OID,
+            parameters: None,
+        };
+        let signer_identifier = SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
+            issuer: self.certificate.tbs_certificate.issuer.clone(),
+            serial_number: self.certificate.tbs_certificate.serial_number.clone(),
+        });
+        let manifest_digest = Sha256::digest(manifest);
+        let mut signer = SignerInfoBuilder::new(
             &self.private_key,
-            &certificates,
-            manifest,
-            Pkcs7Flags::DETACHED | Pkcs7Flags::BINARY,
-        )?;
-        Ok(signature.to_der()?)
+            signer_identifier,
+            digest_algorithm.clone(),
+            &content,
+            Some(&manifest_digest),
+        )
+        .map_err(cms_error)?;
+        let signing_time = create_signing_time_attribute().map_err(cms_error)?;
+        signer
+            .add_signed_attribute(signing_time)
+            .map_err(cms_error)?;
+
+        let mut signed_data = SignedDataBuilder::new(&content);
+        signed_data
+            .add_digest_algorithm(digest_algorithm)
+            .map_err(cms_error)?
+            .add_certificate(CertificateChoices::Certificate(self.certificate.clone()))
+            .map_err(cms_error)?;
+        for certificate in &self.certificate_chain {
+            signed_data
+                .add_certificate(CertificateChoices::Certificate(certificate.clone()))
+                .map_err(cms_error)?;
+        }
+        Ok(signed_data
+            .add_signer_info::<BlindedRsaSigningKey, rsa::pkcs1v15::Signature>(signer)
+            .map_err(cms_error)?
+            .build()
+            .map_err(cms_error)?
+            .to_der()?)
     }
 }
 
-fn read_pem_certificate(path: &Path, setting: &str) -> anyhow::Result<X509> {
+/// The stable `rsa` crate's `Signer` implementation does not blind PKCS#1 v1.5
+/// private-key operations. Wallet issuance is network-facing, so use the
+/// randomized API to mask timing variation while implementing the interface
+/// expected by the CMS builder.
+struct BlindedRsaSigningKey(SigningKey<Sha256>);
+
+impl Keypair for BlindedRsaSigningKey {
+    type VerifyingKey = VerifyingKey<Sha256>;
+
+    fn verifying_key(&self) -> Self::VerifyingKey {
+        self.0.verifying_key()
+    }
+}
+
+impl x509_cert::spki::DynSignatureAlgorithmIdentifier for BlindedRsaSigningKey {
+    fn signature_algorithm_identifier(
+        &self,
+    ) -> x509_cert::spki::Result<x509_cert::spki::AlgorithmIdentifierOwned> {
+        self.0.signature_algorithm_identifier()
+    }
+}
+
+impl Signer<rsa::pkcs1v15::Signature> for BlindedRsaSigningKey {
+    fn try_sign(&self, message: &[u8]) -> Result<rsa::pkcs1v15::Signature, signature::Error> {
+        let mut rng = rand::rngs::OsRng;
+        let signature = self
+            .0
+            .as_ref()
+            .sign_with_rng(
+                &mut rng,
+                Pkcs1v15Sign::new::<Sha256>(),
+                &Sha256::digest(message),
+            )
+            .map_err(|_| signature::Error::new())?;
+        rsa::pkcs1v15::Signature::try_from(signature.as_slice())
+    }
+}
+
+fn cms_error(error: cms::builder::Error) -> anyhow::Error {
+    anyhow::anyhow!("failed to build Wallet CMS signature: {error}")
+}
+
+fn read_pem_certificate(path: &Path, setting: &str) -> anyhow::Result<x509_cert::Certificate> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read Wallet {setting} '{}'", path.display()))?;
-    let mut certificates = X509::stack_from_pem(&bytes).with_context(|| {
+    let mut certificates = x509_cert::Certificate::load_pem_chain(&bytes).with_context(|| {
         format!(
             "failed to parse Wallet {setting} '{}' as PEM",
             path.display()
@@ -179,24 +271,42 @@ fn read_pem_certificate(path: &Path, setting: &str) -> anyhow::Result<X509> {
     Ok(certificates.remove(0))
 }
 
-fn embedded_intermediate(certificate: &X509) -> anyhow::Result<X509> {
-    let authority_key_id = certificate.authority_key_id();
+fn embedded_intermediate(
+    certificate: &x509_cert::Certificate,
+) -> anyhow::Result<x509_cert::Certificate> {
+    let authority_key_id = authority_key_identifier(certificate)?;
     anyhow::ensure!(
-        authority_key_id.as_ref().map(|id| id.as_slice())
-            == Some(WWDR_G4_SUBJECT_KEY_ID.as_slice()),
+        authority_key_id.as_deref() == Some(WWDR_G4_SUBJECT_KEY_ID.as_slice()),
         "Wallet certificate Authority Key Identifier ({}) does not reference the embedded WWDR G4 certificate; \
          use intermediate_cert_path to configure the matching PEM intermediate certificate, \
          which is probably available from https://www.apple.com/certificateauthority/",
         authority_key_id
             .as_ref()
-            .map(|id| to_hex(id.as_slice()))
+            .map(|id| to_hex(id))
             .unwrap_or_else(|| "missing".into())
     );
-    X509::from_pem(WWDR_G4_PEM).context("failed to parse embedded WWDR G4 certificate")
+    let intermediate = x509_cert::Certificate::from_pem(WWDR_G4_PEM)
+        .context("failed to parse embedded WWDR G4 certificate")?;
+    anyhow::ensure!(
+        subject_key_identifier(&intermediate)?.as_deref()
+            == Some(WWDR_G4_SUBJECT_KEY_ID.as_slice()),
+        "embedded WWDR G4 certificate has an unexpected Subject Key Identifier"
+    );
+    Ok(intermediate)
 }
 
-fn subject_identifier(certificate: &X509, nid: Nid, label: &str) -> anyhow::Result<String> {
-    let mut entries = certificate.subject_name().entries_by_nid(nid);
+fn subject_identifier(
+    certificate: &x509_cert::Certificate,
+    oid: ObjectIdentifier,
+    label: &str,
+) -> anyhow::Result<String> {
+    let mut entries = certificate
+        .tbs_certificate
+        .subject
+        .0
+        .iter()
+        .flat_map(|rdn| rdn.0.iter())
+        .filter(|entry| entry.oid == oid);
     let entry = entries
         .next()
         .with_context(|| format!("Wallet certificate subject is missing {label}"))?;
@@ -204,12 +314,93 @@ fn subject_identifier(certificate: &X509, nid: Nid, label: &str) -> anyhow::Resu
         entries.next().is_none(),
         "Wallet certificate subject contains multiple {label} values"
     );
-    let value = entry.data().to_string()?;
+    let value = attribute_string(&entry.value)
+        .with_context(|| format!("Wallet certificate subject {label} is not a supported string"))?;
     anyhow::ensure!(
         !value.trim().is_empty(),
         "Wallet certificate subject {label} must not be empty"
     );
     Ok(value)
+}
+
+fn attribute_string(value: &der::asn1::Any) -> der::Result<String> {
+    Ok(match value.tag() {
+        Tag::Utf8String => Utf8StringRef::try_from(value)?.as_str(),
+        Tag::PrintableString => PrintableStringRef::try_from(value)?.as_str(),
+        Tag::Ia5String => Ia5StringRef::try_from(value)?.as_str(),
+        Tag::TeletexString => TeletexStringRef::try_from(value)?.as_str(),
+        tag => return Err(tag.value_error()),
+    }
+    .to_string())
+}
+
+fn authority_key_identifier(
+    certificate: &x509_cert::Certificate,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let Some(extension) = certificate
+        .tbs_certificate
+        .extensions
+        .as_ref()
+        .and_then(|extensions| {
+            extensions
+                .iter()
+                .find(|extension| extension.extn_id == AUTHORITY_KEY_IDENTIFIER_OID)
+        })
+    else {
+        return Ok(None);
+    };
+    let authority =
+        x509_cert::ext::pkix::AuthorityKeyIdentifier::from_der(extension.extn_value.as_bytes())?;
+    Ok(authority.key_identifier.map(|id| id.as_bytes().to_vec()))
+}
+
+fn subject_key_identifier(certificate: &x509_cert::Certificate) -> anyhow::Result<Option<Vec<u8>>> {
+    let Some(extension) = certificate
+        .tbs_certificate
+        .extensions
+        .as_ref()
+        .and_then(|extensions| {
+            extensions
+                .iter()
+                .find(|extension| extension.extn_id == SUBJECT_KEY_IDENTIFIER_OID)
+        })
+    else {
+        return Ok(None);
+    };
+    let identifier =
+        x509_cert::ext::pkix::SubjectKeyIdentifier::from_der(extension.extn_value.as_bytes())?;
+    Ok(Some(identifier.0.as_bytes().to_vec()))
+}
+
+fn certificate_public_key(certificate: &x509_cert::Certificate) -> anyhow::Result<RsaPublicKey> {
+    Ok(RsaPublicKey::from_public_key_der(
+        &certificate
+            .tbs_certificate
+            .subject_public_key_info
+            .to_der()?,
+    )?)
+}
+
+fn verify_certificate_signature(
+    certificate: &x509_cert::Certificate,
+    issuer: &x509_cert::Certificate,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        certificate.signature_algorithm.oid == SHA256_WITH_RSA_OID
+            && certificate.tbs_certificate.signature.oid == SHA256_WITH_RSA_OID,
+        "Wallet certificate uses unsupported signature algorithm {}; expected SHA-256 with RSA",
+        certificate.signature_algorithm.oid
+    );
+    let public_key = certificate_public_key(issuer)?;
+    let signature = rsa::pkcs1v15::Signature::try_from(
+        certificate
+            .signature
+            .as_bytes()
+            .context("Wallet certificate signature has unused bits")?,
+    )?;
+    VerifyingKey::<Sha256>::new(public_key)
+        .verify(&certificate.tbs_certificate.to_der()?, &signature)?;
+    Ok(())
 }
 
 fn solid_icon(size: u32) -> anyhow::Result<Vec<u8>> {
@@ -267,256 +458,5 @@ struct Barcode {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{WalletPass, to_hex};
-    use openssl::asn1::{Asn1Integer, Asn1Time};
-    use openssl::bn::BigNum;
-    use openssl::hash::MessageDigest;
-    use openssl::pkcs7::Pkcs7;
-    use openssl::pkey::{PKey, Private};
-    use openssl::rsa::Rsa;
-    use openssl::x509::{X509, X509NameBuilder};
-    use serde_json::Value;
-    use sha1::{Digest as _, Sha1};
-    use std::collections::BTreeMap;
-    use std::io::{Cursor, Read};
-    use zip::ZipArchive;
-
-    #[test]
-    fn builds_signed_pass_with_byte_preserving_qr_payload() {
-        let (private_key, certificate) = self_signed_certificate("Pass signer");
-        let (_, wwdr_certificate) = self_signed_certificate("Test WWDR");
-        let wallet = WalletPass {
-            certificate,
-            private_key,
-            certificate_chain: vec![wwdr_certificate],
-            pass_type_identifier: "pass.example.membership".into(),
-            team_identifier: "TEAM123456".into(),
-            organization_name: "Example Membership".into(),
-        };
-        let credential: Vec<u8> = (0..=255).collect();
-
-        let bytes = wallet.build("Alice Smith", &credential).unwrap();
-        let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
-        let mut files = BTreeMap::new();
-        for index in 0..archive.len() {
-            let mut file = archive.by_index(index).unwrap();
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents).unwrap();
-            files.insert(file.name().to_string(), contents);
-        }
-
-        for required in [
-            "pass.json",
-            "icon.png",
-            "icon@2x.png",
-            "icon@3x.png",
-            "manifest.json",
-            "signature",
-        ] {
-            assert!(files.contains_key(required), "missing {required}");
-        }
-        Pkcs7::from_der(&files["signature"]).unwrap();
-
-        let manifest: BTreeMap<String, String> =
-            serde_json::from_slice(&files["manifest.json"]).unwrap();
-        for (name, expected_hash) in manifest {
-            assert_eq!(to_hex(&Sha1::digest(&files[&name])), expected_hash);
-        }
-
-        let pass: Value = serde_json::from_slice(&files["pass.json"]).unwrap();
-        assert_eq!(pass["generic"]["primaryFields"][0]["value"], "Alice Smith");
-        assert_eq!(pass["barcodes"][0]["messageEncoding"], "iso-8859-1");
-        let decoded: Vec<u8> = pass["barcodes"][0]["message"]
-            .as_str()
-            .unwrap()
-            .chars()
-            .map(|character| u8::try_from(u32::from(character)).unwrap())
-            .collect();
-        assert_eq!(decoded, credential);
-    }
-
-    #[test]
-    fn loads_pem_identity_with_explicit_intermediate_and_rejects_invalid_inputs() {
-        use super::WalletConfig;
-        let directory = std::env::temp_dir().join(format!("wallet-pem-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let key_path = directory.join("key.pem");
-        let cert_path = directory.join("chain.pem");
-        let (issuer_key, issuer) = self_signed_certificate("Test intermediate");
-        let (key, _) = self_signed_certificate("Pass signer");
-        let mut subject = X509NameBuilder::new().unwrap();
-        subject
-            .append_entry_by_text("UID", "pass.example.test")
-            .unwrap();
-        subject.append_entry_by_text("OU", "ABCDE12345").unwrap();
-        let mut leaf = X509::builder().unwrap();
-        leaf.set_version(2).unwrap();
-        leaf.set_serial_number(&Asn1Integer::from_bn(&BigNum::from_u32(2).unwrap()).unwrap())
-            .unwrap();
-        leaf.set_subject_name(&subject.build()).unwrap();
-        leaf.set_issuer_name(issuer.subject_name()).unwrap();
-        leaf.set_pubkey(&key).unwrap();
-        leaf.set_not_before(&Asn1Time::days_from_now(0).unwrap())
-            .unwrap();
-        leaf.set_not_after(&Asn1Time::days_from_now(1).unwrap())
-            .unwrap();
-        leaf.sign(&issuer_key, MessageDigest::sha256()).unwrap();
-        let leaf = leaf.build();
-        let intermediate_path = directory.join("intermediate.pem");
-        std::fs::write(&intermediate_path, issuer.to_pem().unwrap()).unwrap();
-        let config = || WalletConfig {
-            key_path: key_path.clone(),
-            cert_path: cert_path.clone(),
-            intermediate_cert_path: Some(intermediate_path.clone()),
-            org_name: "Test".into(),
-        };
-        std::fs::write(&key_path, key.private_key_to_pem_pkcs8().unwrap()).unwrap();
-        std::fs::write(&cert_path, leaf.to_pem().unwrap()).unwrap();
-        let wallet = super::WalletPass::load(config()).unwrap();
-        assert_eq!(wallet.pass_type_identifier, "pass.example.test");
-        assert_eq!(wallet.team_identifier, "ABCDE12345");
-        let bytes = wallet.build("Alice Smith", b"test credential").unwrap();
-        let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
-        let mut manifest = Vec::new();
-        zip.by_name("manifest.json")
-            .unwrap()
-            .read_to_end(&mut manifest)
-            .unwrap();
-        let mut signature = Vec::new();
-        zip.by_name("signature")
-            .unwrap()
-            .read_to_end(&mut signature)
-            .unwrap();
-        let signature = Pkcs7::from_der(&signature).unwrap();
-        assert_eq!(signature.signed().unwrap().certificates().unwrap().len(), 2);
-        signature
-            .verify(
-                &openssl::stack::Stack::new().unwrap(),
-                &openssl::x509::store::X509StoreBuilder::new()
-                    .unwrap()
-                    .build(),
-                Some(&manifest),
-                None,
-                openssl::pkcs7::Pkcs7Flags::NOVERIFY,
-            )
-            .unwrap();
-        let mut without_override = config();
-        without_override.intermediate_cert_path = None;
-        let error = super::WalletPass::load(without_override)
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(error.contains("intermediate_cert_path"));
-        assert!(error.contains("https://www.apple.com/certificateauthority/"));
-        std::fs::write(&intermediate_path, leaf.to_pem().unwrap()).unwrap();
-        assert!(
-            super::WalletPass::load(config())
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("did not issue")
-        );
-        std::fs::write(&intermediate_path, issuer.to_pem().unwrap()).unwrap();
-        std::fs::write(&key_path, issuer_key.private_key_to_pem_pkcs8().unwrap()).unwrap();
-        assert!(
-            super::WalletPass::load(config())
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("does not match")
-        );
-        std::fs::write(
-            &cert_path,
-            [issuer.to_pem().unwrap(), leaf.to_pem().unwrap()].concat(),
-        )
-        .unwrap();
-        assert!(
-            super::WalletPass::load(config())
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("exactly one PEM certificate")
-        );
-        assert!(
-            super::subject_identifier(&issuer, openssl::nid::Nid::USERID, "UID")
-                .unwrap_err()
-                .to_string()
-                .contains("missing UID")
-        );
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn selects_embedded_intermediate_by_authority_key_id() {
-        use openssl::x509::extension::AuthorityKeyIdentifier;
-        let intermediate = X509::from_pem(super::WWDR_G4_PEM).unwrap();
-        assert_eq!(
-            intermediate.subject_key_id().unwrap().as_slice(),
-            super::WWDR_G4_SUBJECT_KEY_ID
-        );
-        let (key, _) = self_signed_certificate("Test key");
-        let mut certificate = X509::builder().unwrap();
-        certificate.set_version(2).unwrap();
-        certificate
-            .set_serial_number(&Asn1Integer::from_bn(&BigNum::from_u32(3).unwrap()).unwrap())
-            .unwrap();
-        certificate
-            .set_subject_name(intermediate.subject_name())
-            .unwrap();
-        certificate
-            .set_issuer_name(intermediate.subject_name())
-            .unwrap();
-        certificate.set_pubkey(&key).unwrap();
-        certificate
-            .set_not_before(&Asn1Time::days_from_now(0).unwrap())
-            .unwrap();
-        certificate
-            .set_not_after(&Asn1Time::days_from_now(1).unwrap())
-            .unwrap();
-        let authority = AuthorityKeyIdentifier::new()
-            .keyid(true)
-            .build(&certificate.x509v3_context(Some(&intermediate), None))
-            .unwrap();
-        certificate.append_extension(authority).unwrap();
-        certificate.sign(&key, MessageDigest::sha256()).unwrap();
-        let certificate = certificate.build();
-        assert_eq!(
-            super::embedded_intermediate(&certificate)
-                .unwrap()
-                .to_der()
-                .unwrap(),
-            intermediate.to_der().unwrap()
-        );
-        // The intermediate's AKI points to Apple's root, not to WWDR G4.
-        let error = super::embedded_intermediate(&intermediate)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("intermediate_cert_path"));
-        assert!(error.contains("https://www.apple.com/certificateauthority/"));
-    }
-
-    fn self_signed_certificate(common_name: &str) -> (PKey<Private>, X509) {
-        let private_key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
-        let mut name = X509NameBuilder::new().unwrap();
-        name.append_entry_by_text("CN", common_name).unwrap();
-        let name = name.build();
-        let mut certificate = X509::builder().unwrap();
-        certificate.set_version(2).unwrap();
-        let serial = Asn1Integer::from_bn(&BigNum::from_u32(1).unwrap()).unwrap();
-        certificate.set_serial_number(&serial).unwrap();
-        certificate.set_subject_name(&name).unwrap();
-        certificate.set_issuer_name(&name).unwrap();
-        certificate.set_pubkey(&private_key).unwrap();
-        certificate
-            .set_not_before(&Asn1Time::days_from_now(0).unwrap())
-            .unwrap();
-        certificate
-            .set_not_after(&Asn1Time::days_from_now(1).unwrap())
-            .unwrap();
-        certificate
-            .sign(&private_key, MessageDigest::sha256())
-            .unwrap();
-        (private_key, certificate.build())
-    }
-}
+#[path = "wallet_tests.rs"]
+mod tests;
