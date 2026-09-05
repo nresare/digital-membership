@@ -713,6 +713,7 @@ mod tests {
             .decode(encoded)
             .unwrap();
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(!body.contains("Add to Wallet"), "{body}");
         assert!(body.contains("4242 (number)"), "{body}");
         assert!(body.contains("member, vegetarian"), "{body}");
     }
