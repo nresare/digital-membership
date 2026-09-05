@@ -1,5 +1,7 @@
 [[website]]
 name = "dm.noa.re"
 namespace = "digital-membership"
-config = {"/config/digital-membership.toml" = "digital-membership.toml"}
+[website.config]
+"/config/digital-membership.toml" = "digital-membership.toml"
+"/config/wallet-cert.pem" = "wallet-cert.pem"
 external-secret = "/keys"
