@@ -40,16 +40,10 @@ impl Config {
                 anyhow::bail!("issuer id '{}' is configured more than once", issuer.id);
             }
         }
-        if let Some(wallet) = &self.wallet {
-            if wallet.pass_type_identifier.is_empty() {
-                anyhow::bail!("wallet.pass_type_identifier must not be empty");
-            }
-            if wallet.team_identifier.is_empty() {
-                anyhow::bail!("wallet.team_identifier must not be empty");
-            }
-            if wallet.organization_name.is_empty() {
-                anyhow::bail!("wallet.organization_name must not be empty");
-            }
+        if let Some(wallet) = &self.wallet
+            && wallet.org_name.trim().is_empty()
+        {
+            anyhow::bail!("wallet.org_name must not be empty");
         }
         Ok(())
     }
@@ -172,10 +166,27 @@ mod tests {
     }
 
     #[test]
-    fn wallet_section_requires_every_field() {
-        let error = parse(&format!("{ISSUER}\n[wallet]\npkcs12 = \"pass.p12\"\n")).unwrap_err();
+    fn wallet_section_requires_key_and_cert_paths() {
+        let error = parse(&format!("{ISSUER}\n[wallet]\nkey_path = \"key.pem\"\n")).unwrap_err();
 
-        assert!(error.to_string().contains("wwdr_certificate"));
+        assert!(error.to_string().contains("cert_path"));
+    }
+
+    #[test]
+    fn wallet_accepts_intermediate_override() {
+        let config = parse(&format!(
+            r#"{ISSUER}
+            [wallet]
+            key_path = "key.pem"
+            cert_path = "pass.pem"
+            intermediate_cert_path = "wwdr.pem"
+        "#
+        ))
+        .unwrap();
+        assert_eq!(
+            config.wallet.unwrap().intermediate_cert_path,
+            Some("wwdr.pem".into())
+        );
     }
 
     #[test]
@@ -192,17 +203,19 @@ mod tests {
             {ISSUER}
 
             [wallet]
-            pkcs12 = "/secrets/pass.p12"
-            wwdr_certificate = "/secrets/AppleWWDR.pem"
-            pass_type_identifier = "pass.example.digital-membership"
-            team_identifier = "ABCDE12345"
+            key_path = "/secrets/key.pem"
+            cert_path = "/config/cert.pem"
             "#
         ))
         .unwrap();
 
         assert_eq!(config.bind_address.to_string(), "127.0.0.1:9000");
         let wallet = config.wallet.unwrap();
-        assert_eq!(wallet.team_identifier, "ABCDE12345");
-        assert_eq!(wallet.organization_name, "Digital Membership");
+        assert_eq!(
+            wallet.key_path,
+            std::path::PathBuf::from("/secrets/key.pem")
+        );
+        assert_eq!(wallet.org_name, "Digital Membership");
+        assert!(wallet.intermediate_cert_path.is_none());
     }
 }

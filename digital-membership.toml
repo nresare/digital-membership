@@ -43,11 +43,13 @@ flags = ["member", "committee", "vegetarian", "under-18"]
 # which case GET /api/{id}/wallet responds with HTTP 503. The configured pass
 # identity is shared by every issuer.
 [wallet]
-# Pass Type signing identity exported as PKCS#12, without an export password:
-# the file is itself the secret, so mount it from a Secret.
-pkcs12 = "/secrets/pass-identity.p12"
-# Apple Worldwide Developer Relations intermediate certificate, PEM or DER.
-wwdr_certificate = "/secrets/AppleWWDR.pem"
-pass_type_identifier = "pass.example.digital-membership"
-team_identifier = "ABCDE12345"
-organization_name = "Example Membership"
+# Unencrypted PEM private key; mount it from a Secret.
+key_path = "/secrets/pass-key.pem"
+# Single PEM Pass Type certificate.
+# Pass type and team identifiers are read from the certificate subject.
+cert_path = "/config/pass.pem"
+# Optional override when the issuer is not the embedded Apple WWDR G4 certificate.
+# Download the matching intermediate from https://www.apple.com/certificateauthority/
+# intermediate_cert_path = "/config/wwdr.pem"
+# Optional display name; defaults to "Digital Membership".
+org_name = "Example Membership"

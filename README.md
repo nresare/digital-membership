@@ -170,27 +170,49 @@ Names must contain 1–255 UTF-8 bytes and may not contain control characters.
 
 ### Generate an Apple Wallet pass
 
-Wallet support is optional. Configure it with a Pass Type signing identity exported as
-PKCS#12, the Apple Worldwide Developer Relations intermediate certificate, and the
-identifiers from the Apple Developer portal:
+Apple Wallet support is optional. To create wallet passes, you need an Apple developer account
+to be able to create a certificate signed by Apple. Use the following instructions to create
+a pass certificate:
+
+- Generate a new 2048-bit RSA key pair. As of September 2026 this algorithm and key size is required.
+  I use `openssl genrsa -out key.pem 2048`
+- Generate a certificate request. I used `openssl req -new -key key.pem -subj "/CN=wallet pass signing key" >req.csr`
+- In Apple's Developer portal on https://developer.apple.com/ click on the little person icon in the top right corner
+- Select "Certificates, IDs & profiles"
+- Create a Pass Type ID
+  - Under "Identifiers" click the blue Plus sign
+  - Under "Pass Type ID" enter a name for the pass type.
+- Create a Pass Type ID certificate
+  - Under "Certificates" select the blue plus sign
+  - Under Services select "Pass Type ID Certificate"
+  - Select Continue
+  - Add a descriptive name and upload the certificate request created above
+  - Select the Pass type ID created above
+  - Select Continue
+  - Download the cert
+  - Convert the cert from .der to .pem: `openssl x509 -inform DER -in cert.cer -out cert.pem`
+
+Now you have what you need to configure this app. The following is an example of the config file:
 
 ```toml
 [wallet]
-pkcs12 = "/path/to/pass-identity.p12"
-wwdr_certificate = "/path/to/AppleWWDR.cer"
-pass_type_identifier = "pass.example.digital-membership"
-team_identifier = "ABCDE12345"
-organization_name = "Example Membership"
+key_path = "/secrets/pass-key.pem"
+cert_path = "/config/pass.pem"
+org_name = "Example Membership"
 ```
 
-Omit the whole `[wallet]` section to disable Wallet support; within it, every key other
-than `organization_name` is required. `organization_name` defaults to `Digital
-Membership`. The certificate may be PEM or DER.
+Omit the whole `[wallet]` section to disable Wallet support. `key_path` and
+`cert_path` are required; `org_name` defaults to `Digital Membership`.
+The pass type identifier is read from the signing certificate's subject `UID`,
+and the team identifier from its subject `OU`.
 
-Export the PKCS#12 identity without a password. The file holds the Pass Type private
-key, so it is the secret in its own right and must be mounted from a Kubernetes Secret
-rather than a ConfigMap; wrapping it in a second secret that has to be deployed
-alongside it protects nothing.
+`cert_path` contains a single Pass Type certificate in PEM format. The binary
+embeds Apple's WWDR G4 intermediate certificate and automatically uses it when
+the pass certificate's Authority Key Identifier matches G4's Subject Key
+Identifier.
+
+If your pass certificate references a different intermediate, configure its PEM
+certificate explicitly, using the `intermediate_cert_path` key.
 
 The Wallet identity is configured once and shared by every issuer.
 
@@ -202,15 +224,9 @@ https://example.com/api/example/wallet?name=Alice%20Smith&flags=member,vegetaria
 ```
 
 It returns a signed `application/vnd.apple.pkpass` download. Opening the URL in Safari
-on an iPhone presents the pass for addition to Apple Wallet. Wallet renders the QR code
-from the same binary credential used by the QR endpoint; the pass does not contain a separate
-QR image. Generated passes currently use a plain built-in placeholder icon and do not
-support push updates.
-
-If Wallet support is not configured, the endpoint returns HTTP 503. In a production
-deployment, avoid putting personal details directly in a URL: use an authenticated,
-opaque enrollment URL that resolves to the name, flags, and member identifier on the
-server.
+on an iPhone presents the pass in Apple Wallet and asks whether the user wants to add it.
+Wallet renders the QR code from the same binary credential used by the QR endpoint;
+the pass does not contain a separate QR image.
 
 ### Bootstrap a scanner
 

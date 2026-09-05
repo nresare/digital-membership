@@ -144,11 +144,27 @@ pub(crate) async fn qr(
         Identifier::Number(number) => format!("{number} (number)"),
         Identifier::Text(text) => format!("{} (text)", escape(&text)),
     };
+    let wallet_link = if state.wallet.is_some() {
+        let flags = issuer.resolve_flags(
+            &request
+                .flags
+                .iter()
+                .cloned()
+                .map(FlagRef::Label)
+                .collect::<Vec<_>>(),
+        )?;
+        format!(
+            "<p><a href=\"{}\">Add to Wallet</a></p>\n",
+            escape(&request.wallet_url(&flags))
+        )
+    } else {
+        String::new()
+    };
     let body = format!(
         "<h1>{name}</h1>\n\
          <img src=\"data:image/png;base64,{png}\" alt=\"Membership credential QR code\">\n\
          <p>Issuer: {issuer}<br>Id: {identifier}<br>Flags: {flags}</p>\n\
-         <p><a href=\"/test\">Generate another</a></p>\n",
+         {wallet_link}<p><a href=\"/test\">Generate another</a></p>\n",
         name = escape(&request.name),
         png = STANDARD.encode(&png),
         issuer = escape(&issuer.name),
@@ -171,6 +187,25 @@ struct FormRequest {
 }
 
 impl FormRequest {
+    fn wallet_url(&self, flags: &[u32]) -> String {
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        query.append_pair("name", &self.name);
+        match identifier(&self.id) {
+            Identifier::None => {}
+            Identifier::Number(number) => {
+                query.append_pair("member_number", &number.to_string());
+            }
+            Identifier::Text(text) => {
+                query.append_pair("member_id", &text);
+            }
+        }
+        // Numeric flags preserve labels containing commas through the API parser.
+        for flag in flags {
+            query.append_pair("flags", &flag.to_string());
+        }
+        format!("/api/{}/wallet?{}", self.issuer, query.finish())
+    }
+
     fn parse(query: Option<&str>) -> Result<Self, AppError> {
         let mut issuer = None;
         let mut name = None;
@@ -219,6 +254,35 @@ fn credential(issuer: &Issuer, request: &FormRequest) -> Result<Vec<u8>, AppErro
 #[cfg(test)]
 mod tests {
     use super::{Identifier, escape, identifier};
+
+    #[test]
+    fn wallet_link_preserves_name_flags_and_identifier_type() {
+        for (id, expected) in [
+            ("", Identifier::None),
+            ("4242", Identifier::Number(4242)),
+            ("007&x", Identifier::Text("007&x".into())),
+        ] {
+            let request = super::FormRequest {
+                issuer: "example".into(),
+                name: "Alice & Bob".into(),
+                id: id.into(),
+                flags: vec![],
+            };
+            let url = request.wallet_url(&[0, 2]);
+            let (path, query) = url.split_once('?').unwrap();
+            assert_eq!(path, "/api/example/wallet");
+            let parsed = crate::parse_qr_query(Some(query)).unwrap();
+            assert_eq!(parsed.name, request.name);
+            assert_eq!(parsed.identifier().unwrap(), expected);
+            assert_eq!(
+                parsed.flags,
+                vec![
+                    crate::issuer::FlagRef::Number(0),
+                    crate::issuer::FlagRef::Number(2)
+                ]
+            );
+        }
+    }
 
     #[test]
     fn an_id_of_digits_is_carried_as_a_number() {
