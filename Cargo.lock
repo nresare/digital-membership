@@ -346,7 +346,7 @@ dependencies = [
  "sha1",
  "sha2",
  "sha3",
- "signature",
+ "signature 2.2.0",
  "spki",
  "x509-cert",
  "zeroize",
@@ -470,7 +470,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2",
- "signature",
+ "signature 3.0.0",
  "thiserror",
  "tokio",
  "toml",
@@ -1281,7 +1281,7 @@ dependencies = [
  "pkcs8",
  "rand_core 0.6.4",
  "sha2",
- "signature",
+ "signature 2.2.0",
  "spki",
  "subtle",
  "zeroize",
@@ -1424,6 +1424,12 @@ dependencies = [
  "digest",
  "rand_core 0.6.4",
 ]
+
+[[package]]
+name = "signature"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
 
 [[package]]
 name = "simd-adler32"
@@ -1855,7 +1861,7 @@ dependencies = [
  "const-oid",
  "der",
  "sha1",
- "signature",
+ "signature 2.2.0",
  "spki",
  "tls_codec",
 ]
