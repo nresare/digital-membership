@@ -1177,9 +1177,9 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "qrcode-generator"
-version = "6.0.0"
+version = "6.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "839ce5d4bbbc258ab4b83061d1e813af257cdf7a63df4837b9cc39f11ffac2d4"
+checksum = "fcc47eeed15518f033b510163b6e8b29eda57896423be4ac367890bd4960f73b"
 dependencies = [
  "atomic-write-file",
  "html-escape",
