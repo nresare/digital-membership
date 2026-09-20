@@ -16,7 +16,7 @@ getrandom = "0.4"
 namecompress = "0.2.0"
 png = "0.18"
 qrcode-generator = "6.0"
-rand = "0.8.5"
+rand = "0.10.0"
 rsa = { version = "0.9.10", features = ["pem", "sha2"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
